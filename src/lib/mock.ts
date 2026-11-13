@@ -128,7 +128,7 @@ const projects: Record<string, ProjectEntry[]> = {
   ],
 };
 
-const state = (): HubState => structuredClone({ config, browsers, runningProfiles: running });
+const state = (): HubState => structuredClone({ config, browsers, runningProfiles: running, busyHotkeys: [] });
 const delay = <T,>(v: T, ms = 120) => new Promise<T>((r) => setTimeout(() => r(v), ms));
 
 export function installMocks() {

@@ -74,6 +74,11 @@ export function SettingsPage({ state, onState }: { state: HubState; onState: (s:
       <div className="stack">
         <div className="card">
           <div className="card__title">Горячие клавиши</div>
+          {state.busyHotkeys.length > 0 && (
+            <div className="setting__sub" style={{ color: "#ff6b6b", marginBottom: 8 }}>
+              Заняты другой программой: {state.busyHotkeys.join(", ")}. Выберите другое сочетание.
+            </div>
+          )}
           <div className="setting">
             <div className="setting__text">
               <div className="setting__title">Открыть хаб</div>

@@ -45,6 +45,18 @@ function HubInner() {
   const saved = profiles.find((p) => p.id === selectedId) ?? null;
   const dirty = !!draft && (isNew || !profilesEqual(draft, baseline));
 
+  // Предупредить о хоткеях, которые заняла другая программа (один раз на каждый набор).
+  const busyKey = (state?.busyHotkeys ?? []).join(", ");
+  useEffect(() => {
+    if (!busyKey) return;
+    toast.show({
+      kind: "error",
+      title: "Хоткей занят другой программой",
+      text: `${busyKey} — выберите другое сочетание в настройках или профиле`,
+      duration: 8000,
+    });
+  }, [busyKey, toast]);
+
   const loadDraft = useCallback((p: Profile | null, asNew = false) => {
     setSelectedId(p?.id ?? null);
     setDraft(p);

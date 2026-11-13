@@ -75,6 +75,8 @@ export interface HubState {
   config: AppConfig;
   browsers: BrowserInfo[];
   runningProfiles: string[];
+  /** Хоткеи, занятые другими программами. */
+  busyHotkeys: string[];
 }
 
 export interface Game {

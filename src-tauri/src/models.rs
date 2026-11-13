@@ -198,4 +198,6 @@ pub struct HubState {
     pub browsers: Vec<BrowserInfo>,
     /// id профилей, у которых сейчас есть запущенные приложения/браузеры.
     pub running_profiles: Vec<String>,
+    /// Хоткеи, которые не удалось зарегистрировать (заняты другой программой).
+    pub busy_hotkeys: Vec<String>,
 }

@@ -20,6 +20,8 @@ pub struct AppState {
     pub prev_work: Mutex<Option<String>>,
     /// Сериализует переключения (хоткей + клик одновременно).
     pub switching: Mutex<()>,
+    /// Хоткеи, занятые другими программами (по результату последней регистрации).
+    pub busy_hotkeys: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
             tracked: Mutex::new(HashMap::new()),
             prev_work: Mutex::new(prev_work),
             switching: Mutex::new(()),
+            busy_hotkeys: Mutex::new(Vec::new()),
         }
     }
 
@@ -87,10 +90,12 @@ pub fn hub_state(app: &AppHandle) -> HubState {
             .collect()
     };
     let browsers = st.browsers.lock().clone();
+    let busy_hotkeys = st.busy_hotkeys.lock().clone();
     HubState {
         config: cfg,
         browsers,
         running_profiles,
+        busy_hotkeys,
     }
 }
 
@@ -248,7 +253,10 @@ fn should_close(on_leave: LeaveBehavior, target: ProfileKind) -> bool {
 
 pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
     let st = state(app);
+    let t0 = std::time::Instant::now();
     let _guard = st.switching.lock();
+    let ms = |label: &str| log::debug!("switch: {label} @ {} мс", t0.elapsed().as_millis());
+    ms("lock");
 
     let target = st.profile(id)?;
     let (prev, settings, owned_desktops) = {
@@ -262,6 +270,7 @@ pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
         (prev, cfg.settings.clone(), owned)
     };
 
+    ms("start");
     // 1. уходим из старого профиля
     if let Some(prev) = prev.as_ref().filter(|p| p.id != target.id) {
         if should_close(prev.on_leave, target.kind) {
@@ -281,7 +290,9 @@ pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
             log::warn!("обои: {e}");
         }
     }
+    ms("desktop ready");
     desktop::switch(desk)?;
+    ms("desktop switched");
 
     if settings.apply_windows_theme {
         if let Err(e) = desktop::apply_theme(target.theme == ThemeMode::Light) {
@@ -307,6 +318,7 @@ pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
         autostart(app, &target);
     }
 
+    ms("autostart checked");
     // 5. окна
     hide_hub(app);
     match target.kind {
@@ -314,7 +326,9 @@ pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
         ProfileKind::Work => hide_game_window(app),
     }
 
+    ms("windows done");
     emit_state(app);
+    ms("state emitted");
     Ok(())
 }
 
@@ -406,10 +420,21 @@ fn run_action(app: AppHandle, action: HotkeyAction) {
                 Ok(())
             }
             HotkeyAction::GameMode => {
-                let in_game = app
+                let window_visible = app
                     .get_webview_window("game")
                     .and_then(|w| w.is_visible().ok())
                     .unwrap_or(false);
+                let active_is_gaming = {
+                    let st = state(&app);
+                    let cfg = st.config.lock();
+                    cfg.active_profile_id
+                        .as_ref()
+                        .and_then(|id| cfg.profiles.iter().find(|p| &p.id == id))
+                        .map(|p| p.kind == ProfileKind::Gaming)
+                        .unwrap_or(false)
+                };
+                let in_game = window_visible || active_is_gaming;
+                log::info!("хоткей игрового режима: окно видно={window_visible}, активен игровой={active_is_gaming}");
                 if in_game {
                     exit_game_mode(&app)
                 } else {
@@ -456,5 +481,6 @@ pub fn register_hotkeys(app: &AppHandle) -> Vec<String> {
             failed.push(keys);
         }
     }
+    *state(app).busy_hotkeys.lock() = failed.clone();
     failed
 }

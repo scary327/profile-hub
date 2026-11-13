@@ -21,6 +21,7 @@ const EXCLUDED_IDS: &[&str] = &[
     "1826330", // Proton EasyAntiCheat Runtime
     "1161040", // Proton BattlEye Runtime
     "323910",  // SteamVR Performance Test
+    "431960",  // Wallpaper Engine (программа, не игра)
 ];
 const EXCLUDED_PREFIXES: &[&str] = &["proton", "steam linux runtime", "steamworks", "steamvr"];
 
