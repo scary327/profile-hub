@@ -83,6 +83,7 @@ fn default_config() -> AppConfig {
         profiles_root: String::new(),
         launch_on_startup: true,
         apply_windows_theme: true,
+        game_monitor: None,
     };
     let mut work = new_profile(ProfileKind::Work, "Работа");
     work.hotkey = Some("Ctrl+Alt+1".into());
@@ -96,6 +97,7 @@ fn default_config() -> AppConfig {
         last_played: Default::default(),
         prev_work_profile_id: None,
         pending_game_mode_sid: None,
+        voice_bookmarks: default_bookmarks(),
     }
 }
 

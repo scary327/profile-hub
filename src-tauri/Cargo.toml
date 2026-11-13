@@ -13,7 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+# unstable — несколько WebView в одном окне (встроенный браузер в игровом режиме)
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -33,6 +34,7 @@ hidapi = { version = "2.6", default-features = false, features = ["windows-nativ
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+sysinfo = "0.37"
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",

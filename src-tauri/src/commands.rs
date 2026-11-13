@@ -3,7 +3,7 @@
 
 use crate::core::{self, state};
 use crate::models::*;
-use crate::{browsers, config, games, util};
+use crate::{browsers, config, gamemode, games, util};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
@@ -312,6 +312,83 @@ pub async fn debug_log(msg: String) {
 #[tauri::command]
 pub async fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+// ---------- игровой режим ----------
+
+#[tauri::command]
+pub async fn list_monitors(app: AppHandle) -> CmdResult<Vec<MonitorInfo>> {
+    gamemode::list_monitors(&app).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn move_game_to_monitor(app: AppHandle, name: String) -> CmdResult<()> {
+    gamemode::move_game_to_monitor(&app, &name).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn running_games(app: AppHandle) -> Vec<RunningGame> {
+    gamemode::running_games(&app)
+}
+
+#[tauri::command]
+pub async fn focus_game(app: AppHandle, game_id: String) -> CmdResult<()> {
+    gamemode::focus_game(&app, &game_id).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn voice_apps() -> VoiceApps {
+    gamemode::voice_apps()
+}
+
+#[tauri::command]
+pub async fn open_discord() -> CmdResult<()> {
+    gamemode::open_discord().map_err(ea)
+}
+
+#[tauri::command]
+pub async fn open_steam_chat() -> CmdResult<()> {
+    gamemode::open_steam_chat().map_err(ea)
+}
+
+#[tauri::command]
+pub async fn browser_open(app: AppHandle, url: Option<String>, rect: Rect) -> CmdResult<()> {
+    gamemode::browser_open(&app, url.as_deref(), rect).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn browser_set_bounds(app: AppHandle, rect: Rect) -> CmdResult<()> {
+    gamemode::browser_set_bounds(&app, rect).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn browser_hide(app: AppHandle) -> CmdResult<()> {
+    gamemode::browser_hide(&app).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn browser_close(app: AppHandle) -> CmdResult<()> {
+    gamemode::browser_close(&app).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn browser_nav(app: AppHandle, action: String) -> CmdResult<()> {
+    gamemode::browser_nav(&app, &action).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn save_voice_bookmarks(app: AppHandle, bookmarks: Vec<Bookmark>) -> CmdResult<HubState> {
+    let bookmarks: Vec<Bookmark> = bookmarks
+        .into_iter()
+        .filter(|b| b.url.starts_with("http://") || b.url.starts_with("https://"))
+        .collect();
+    state(&app)
+        .update_config(|cfg| {
+            cfg.voice_bookmarks = bookmarks;
+            Ok(())
+        })
+        .map_err(ea)?;
+    Ok(core::hub_state(&app))
 }
 
 /// Пересканировать браузеры (например, после установки нового).

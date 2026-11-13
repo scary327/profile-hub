@@ -219,6 +219,7 @@ fn game_window(app: &AppHandle) -> Result<WebviewWindow> {
 pub fn show_game_window(app: &AppHandle) -> Result<()> {
     let w = game_window(app)?;
     w.show()?;
+    crate::gamemode::place_on_saved_monitor(app, &w);
     let _ = w.set_fullscreen(true);
     let _ = w.set_focus();
     hide_hub(app);

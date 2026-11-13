@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod core;
 mod desktop;
+mod gamemode;
 mod gamepad;
 mod games;
 mod models;
@@ -135,6 +136,19 @@ pub fn run() {
             commands::link_current_user,
             commands::link_windows_user,
             commands::unlink_windows_user,
+            commands::list_monitors,
+            commands::move_game_to_monitor,
+            commands::running_games,
+            commands::focus_game,
+            commands::voice_apps,
+            commands::open_discord,
+            commands::open_steam_chat,
+            commands::browser_open,
+            commands::browser_set_bounds,
+            commands::browser_hide,
+            commands::browser_close,
+            commands::browser_nav,
+            commands::save_voice_bookmarks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -55,6 +55,20 @@ const SHAPES = {
       />
     </Svg>
   ),
+  // Create (DualSense): три коротких «луча» над капсулой
+  create: (
+    <Svg>
+      <path d="M5.6 3.2l1.4 2.6M10 2.2v3.2M14.4 3.2L13 5.8" {...STROKE} strokeWidth={1.9} />
+      <rect x="3.8" y="9" width="12.4" height="7.4" rx="3.7" {...STROKE} strokeWidth={1.9} />
+    </Svg>
+  ),
+  // View (Xbox): два наложенных окна
+  view: (
+    <Svg>
+      <rect x="3.4" y="3.4" width="9.4" height="7.6" rx="1.6" {...STROKE} strokeWidth={1.9} />
+      <path d="M7.2 14.2v.6a1.6 1.6 0 0 0 1.6 1.6h6.2a1.6 1.6 0 0 0 1.6-1.6V8.8a1.6 1.6 0 0 0-1.6-1.6h-.6" {...STROKE} strokeWidth={1.9} />
+    </Svg>
+  ),
   arrows: (
     <Svg>
       <path d="M10 2.8v14.4M2.8 10h14.4M7.6 5.2L10 2.8l2.4 2.4M7.6 14.8l2.4 2.4 2.4-2.4M5.2 7.6L2.8 10l2.4 2.4M14.8 7.6l2.4 2.4-2.4 2.4" {...STROKE} strokeWidth={1.7} />
@@ -73,6 +87,7 @@ const PS: Record<GlyphAction, Spec> = {
   tabPrev: { cls: "shoulder", content: text("L1") },
   tabNext: { cls: "shoulder", content: text("R1") },
   menu: { cls: "shoulder shoulder--icon", content: SHAPES.menu },
+  voice: { cls: "shoulder shoulder--icon", content: SHAPES.create },
   nav: { cls: "bare", content: SHAPES.dpad },
 };
 
@@ -83,6 +98,7 @@ const XBOX: Record<GlyphAction, Spec> = {
   tabPrev: { cls: "shoulder", content: text("LB") },
   tabNext: { cls: "shoulder", content: text("RB") },
   menu: { cls: "pad", content: SHAPES.menu },
+  voice: { cls: "pad", content: SHAPES.view },
   nav: { cls: "bare", content: SHAPES.dpad },
 };
 
@@ -93,6 +109,7 @@ const KEYS: Record<GlyphAction, Spec> = {
   tabPrev: { cls: "key", content: text("Q") },
   tabNext: { cls: "key", content: text("E") },
   menu: { cls: "key", content: text("Esc") },
+  voice: { cls: "key", content: text("V") },
   nav: { cls: "key key--icon", content: SHAPES.arrows },
 };
 

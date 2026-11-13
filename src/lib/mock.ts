@@ -4,9 +4,12 @@
  * import.meta.env.DEV и отсутствии Tauri, в production-сборку не попадает.
  * Окно игрового режима: http://localhost:1420/?window=game (&pad=ps / &pad=xbox — фейковый геймпад).
  * Хаб в непривязанной учётке: http://localhost:1420/?unlinked=1
+ * Игровой режим: запущенная игра по умолчанию — Cyberpunk 2077 (&running=0 — ничего не запущено, &running=2 — две игры),
+ * &monitors=1 — один монитор (пункт «Экран» скрыт).
  */
 import { mockConvertFileSrc, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import type { AppConfig, BrowserInfo, Game, HubState, LauncherInfo, ManualGame, Profile, ProjectEntry, Settings, WindowsUser, WinUserInfo } from "../api";
+import { emit } from "@tauri-apps/api/event";
+import type { AppConfig, Bookmark, BrowserInfo, Game, MonitorInfo, RunningGame, HubState, LauncherInfo, ManualGame, Profile, ProjectEntry, Settings, WindowsUser, WinUserInfo } from "../api";
 
 const now = Math.floor(Date.now() / 1000);
 const DAY = 86_400;
@@ -125,6 +128,7 @@ const settings: Settings = {
   profilesRoot: "C:\\Profiles",
   launchOnStartup: true,
   applyWindowsTheme: true,
+  gameMonitor: null,
 };
 
 const config: AppConfig = {
@@ -158,7 +162,28 @@ const config: AppConfig = {
   lastPlayed: {},
   prevWorkProfileId: "work-a",
   pendingGameModeSid: null,
+  voiceBookmarks: [
+    { name: "Google Meet", url: "https://meet.google.com/" },
+    { name: "Telegram", url: "https://web.telegram.org/" },
+    { name: "YouTube", url: "https://www.youtube.com/" },
+    { name: "Twitch", url: "https://www.twitch.tv/" },
+  ],
 };
+
+// ---------- игровой режим: мониторы, запущенные игры, браузер ----------
+let monitors: MonitorInfo[] = [
+  { name: "\\\\.\\DISPLAY1", label: "Экран 1 · 2560×1440", width: 2560, height: 1440, primary: true, current: true },
+  { name: "\\\\.\\DISPLAY2", label: "Экран 2 · 1920×1080", width: 1920, height: 1080, primary: false, current: false },
+  { name: "\\\\.\\DISPLAY3", label: "LG TV · 3840×2160", width: 3840, height: 2160, primary: false, current: false },
+].slice(0, params.get("monitors") === "1" ? 1 : 3);
+
+const runningParam = params.get("running") ?? "1";
+let running: RunningGame[] = [
+  { gameId: "steam:1091500", startedAt: now - 72 * 60 },
+  { gameId: "steam:570", startedAt: now - 9 * 60 },
+].slice(0, runningParam === "0" ? 0 : runningParam === "2" ? 2 : 1);
+let browserUrl: string | null = null;
+const logBrowser = (cmd: string, a: Record<string, unknown>) => console.info(`[mock] ${cmd}`, JSON.stringify(a));
 
 const projects: Record<string, ProjectEntry[]> = {
   "work-a": [
@@ -198,6 +223,8 @@ const padInfo =
       : { connected: false, type: "xbox", id: "" };
 
 export function installMocks() {
+  // mockIPC выставляет __TAURI_INTERNALS__; по этому флагу UI понимает, что настоящего WebView нет
+  (window as unknown as { __PH_MOCK__?: boolean }).__PH_MOCK__ = true;
   mockWindows(params.get("window") === "game" ? "game" : "main");
   mockConvertFileSrc("windows");
 
@@ -296,6 +323,7 @@ export function installMocks() {
           if (g) {
             g.lastPlayed = Math.floor(Date.now() / 1000);
             games = [...games];
+            if (!running.some((r) => r.gameId === g.id)) running = [...running, { gameId: g.id, startedAt: g.lastPlayed }];
           }
           return delay(undefined);
         }
@@ -323,6 +351,47 @@ export function installMocks() {
           config.manualGames = config.manualGames.filter((m) => m.id !== a.id);
           games = games.filter((g) => g.id !== `manual:${a.id}`);
           return delay(state());
+        case "list_monitors":
+          return delay(structuredClone(monitors));
+        case "move_game_to_monitor":
+          monitors = monitors.map((m) => ({ ...m, current: m.name === a.name }));
+          config.settings.gameMonitor = a.name as string;
+          console.info("[mock] move_game_to_monitor", a.name);
+          return delay(undefined, 250);
+        case "running_games":
+          return delay(structuredClone(running), 40);
+        case "focus_game":
+        case "open_discord":
+        case "open_steam_chat":
+          console.info("[mock]", cmd, a);
+          return delay(undefined);
+        case "voice_apps":
+          return delay({ discord: params.get("discord") !== "0", steam: true });
+        case "browser_open": {
+          logBrowser(cmd, a);
+          if (a.url) {
+            browserUrl = a.url as string;
+            // настоящий WebView шлёт browser-url после навигации
+            setTimeout(() => void emit("browser-url", browserUrl), 300);
+          }
+          return delay(undefined, 30);
+        }
+        case "browser_set_bounds":
+        case "browser_hide":
+          logBrowser(cmd, a);
+          return delay(undefined, 10);
+        case "browser_close":
+          logBrowser(cmd, a);
+          browserUrl = null;
+          return delay(undefined, 10);
+        case "browser_nav":
+          logBrowser(cmd, a);
+          return delay(undefined, 10);
+        case "save_voice_bookmarks":
+          config.voiceBookmarks = a.bookmarks as Bookmark[];
+          return delay(state());
+        case "debug_log":
+          return delay(undefined, 0);
         case "launch_browser":
         case "launch_app":
         case "open_projects_dir":

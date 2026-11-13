@@ -56,11 +56,13 @@ pub struct PadState {
     pub tab_prev: bool,
     pub tab_next: bool,
     pub menu: bool,
+    /// Create/Share (Sony) или View/Back (Xbox) — панель голоса и браузера.
+    pub voice: bool,
     pub dir: Dir,
 }
 
 impl PadState {
-    fn buttons(&self) -> [(bool, &'static str); 6] {
+    fn buttons(&self) -> [(bool, &'static str); 7] {
         [
             (self.confirm, "confirm"),
             (self.back, "back"),
@@ -68,6 +70,7 @@ impl PadState {
             (self.tab_prev, "tabPrev"),
             (self.tab_next, "tabNext"),
             (self.menu, "menu"),
+            (self.voice, "voice"),
         ]
     }
 }
@@ -124,6 +127,7 @@ pub fn parse_sony_report(dualsense: bool, data: &[u8]) -> Option<PadState> {
         tab_next: k1 & 0x02 != 0,
         // k2: 0x01 PS
         menu: k1 & 0x20 != 0 || k2 & 0x01 != 0,
+        voice: k1 & 0x10 != 0,
         dir,
     })
 }
@@ -218,6 +222,7 @@ fn gilrs_state(g: &gilrs::Gamepad) -> PadState {
         tab_prev: g.is_pressed(Button::LeftTrigger),
         tab_next: g.is_pressed(Button::RightTrigger),
         menu: g.is_pressed(Button::Start) || g.is_pressed(Button::Mode),
+        voice: g.is_pressed(Button::Select),
         dir,
     }
 }
@@ -385,7 +390,13 @@ mod tests {
     fn dualsense_usb_l1_r1_options_ps() {
         let r = report(0x01, 64, 1, 8, 0x08, 0x01 | 0x02 | 0x20, 0x01);
         let st = parse_sony_report(true, &r).unwrap();
-        assert!(st.tab_prev && st.tab_next && st.menu);
+        assert!(st.tab_prev && st.tab_next && st.menu && !st.voice);
+    }
+
+    #[test]
+    fn dualsense_create_is_voice() {
+        let r = report(0x31, 78, 2, 9, 0x08, 0x10, 0);
+        assert!(parse_sony_report(true, &r).unwrap().voice);
     }
 
     #[test]

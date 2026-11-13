@@ -73,6 +73,45 @@ export interface Settings {
   profilesRoot: string;
   launchOnStartup: boolean;
   applyWindowsTheme: boolean;
+  /** Монитор игрового режима (MonitorInfo.name); null — основной. */
+  gameMonitor: string | null;
+}
+
+export interface Bookmark {
+  name: string;
+  url: string;
+}
+
+export interface MonitorInfo {
+  /** Системное имя (\\.\DISPLAY2) — передаётся в moveGameToMonitor. */
+  name: string;
+  /** «Экран 2 · 2560×1440» */
+  label: string;
+  width: number;
+  height: number;
+  primary: boolean;
+  /** Окно игрового режима сейчас на этом мониторе. */
+  current: boolean;
+}
+
+/** Запущенная сейчас игра. */
+export interface RunningGame {
+  gameId: string;
+  /** unix seconds */
+  startedAt: number;
+}
+
+export interface VoiceApps {
+  discord: boolean;
+  steam: boolean;
+}
+
+/** Прямоугольник в CSS-пикселях относительно окна (getBoundingClientRect). */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface AppConfig {
@@ -84,6 +123,8 @@ export interface AppConfig {
   prevWorkProfileId: string | null;
   /** Внутреннее: учётка, где после входа откроется игровой режим. */
   pendingGameModeSid: string | null;
+  /** Закладки встроенного браузера игрового режима. */
+  voiceBookmarks: Bookmark[];
 }
 
 export interface BrowserInfo {
@@ -185,7 +226,44 @@ export const api = {
   exitGameMode: () => invoke<void>("exit_game_mode"),
   hideHub: () => invoke<void>("hide_hub"),
   quitApp: () => invoke<void>("quit_app"),
+
+  // ---------- игровой режим: монитор ----------
+  listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
+  /** Перенести окно игрового режима на монитор и запомнить выбор. */
+  moveGameToMonitor: (name: string) => invoke<void>("move_game_to_monitor", { name }),
+
+  // ---------- игровой режим: запущенные игры ----------
+  /** Какие игры из библиотеки запущены сейчас (дёшево, можно опрашивать раз в 2–3 с). */
+  runningGames: () => invoke<RunningGame[]>("running_games"),
+  /** Вывести окно запущенной игры на передний план. */
+  focusGame: (gameId: string) => invoke<void>("focus_game", { gameId }),
+
+  // ---------- игровой режим: голос и встроенный браузер ----------
+  voiceApps: () => invoke<VoiceApps>("voice_apps"),
+  /** Открыть (или вывести на передний план) приложение Discord. */
+  openDiscord: () => invoke<void>("open_discord"),
+  /** Открыть друзей и чаты Steam (оттуда же звонки). */
+  openSteamChat: () => invoke<void>("open_steam_chat"),
+  /**
+   * Встроенный браузер внутри окна игр: настоящий WebView поверх области `rect`
+   * (сайт со звонком получает микрофон; входы хранятся в учётке Windows).
+   * Если браузер уже открыт — переходит на `url` (url=null — оставить текущую страницу) и встаёт в `rect`.
+   */
+  browserOpen: (url: string | null, rect: Rect) => invoke<void>("browser_open", { url, rect }),
+  /** Обновить положение/размер (при ресайзе окна или панели). */
+  browserSetBounds: (rect: Rect) => invoke<void>("browser_set_bounds", { rect }),
+  /** Спрятать панель, не закрывая страницу (звонок продолжается). */
+  browserHide: () => invoke<void>("browser_hide"),
+  /** Закрыть страницу совсем (звонок завершится). */
+  browserClose: () => invoke<void>("browser_close"),
+  browserNav: (action: "back" | "forward" | "reload") => invoke<void>("browser_nav", { action }),
+  saveVoiceBookmarks: (bookmarks: Bookmark[]) => invoke<HubState>("save_voice_bookmarks", { bookmarks }),
 };
+
+/** Встроенный браузер перешёл на новую страницу. */
+export function onBrowserUrl(cb: (url: string) => void): Promise<UnlistenFn> {
+  return listen<string>("browser-url", (e) => cb(e.payload));
+}
 
 /** Бэкенд шлёт "state-changed" с HubState после переключения по хоткею и т.п. */
 export function onStateChanged(cb: (s: HubState) => void): Promise<UnlistenFn> {

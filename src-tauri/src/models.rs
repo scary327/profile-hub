@@ -136,6 +136,57 @@ pub struct Settings {
     pub launch_on_startup: bool,
     /// Применять светлую/тёмную тему Windows при переключении.
     pub apply_windows_theme: bool,
+    /// Монитор для игрового режима (имя из MonitorInfo.name); None — основной.
+    #[serde(default)]
+    pub game_monitor: Option<String>,
+}
+
+/// Закладка встроенного браузера игрового режима (звонилки и т.п.).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Bookmark {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorInfo {
+    /// Системное имя (\\.\DISPLAY2) — идентификатор для move_game_to_monitor.
+    pub name: String,
+    /// Подпись для UI: «Экран 2 · 2560×1440».
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+    /// На этом мониторе сейчас окно игрового режима.
+    pub current: bool,
+}
+
+/// Игра, которая запущена прямо сейчас.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningGame {
+    pub game_id: String,
+    /// Unix-время запуска процесса игры (секунды).
+    pub started_at: u64,
+}
+
+/// Что из голосовых приложений установлено.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceApps {
+    pub discord: bool,
+    pub steam: bool,
+}
+
+/// Прямоугольник в логических (CSS) пикселях относительно окна.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +207,21 @@ pub struct AppConfig {
     /// (переход в игры из другой учётки идёт через экран входа).
     #[serde(default)]
     pub pending_game_mode_sid: Option<String>,
+    /// Закладки встроенного браузера игрового режима.
+    #[serde(default = "default_bookmarks")]
+    pub voice_bookmarks: Vec<Bookmark>,
+}
+
+pub fn default_bookmarks() -> Vec<Bookmark> {
+    [
+        ("Discord", "https://discord.com/app"),
+        ("Google Meet", "https://meet.google.com/"),
+        ("Telegram", "https://web.telegram.org/a/"),
+        ("Яндекс Телемост", "https://telemost.yandex.ru/"),
+    ]
+    .into_iter()
+    .map(|(n, u)| Bookmark { name: n.into(), url: u.into() })
+    .collect()
 }
 
 /// Информация о браузере, найденном в системе.

@@ -13,7 +13,9 @@ export type PadAction =
   | "tabPrev"
   | "tabNext"
   | "menu"
-  | "folder";
+  | "folder"
+  /** Create/Share (DualSense, DS4) или View/Back (Xbox): голос и встроенный браузер. */
+  | "voice";
 
 export type PadType = "playstation" | "xbox";
 
@@ -29,8 +31,8 @@ const STICK_THRESHOLD = 0.5;
 
 /** Логические кнопки в терминах стандартной раскладки W3C. */
 interface PadState {
-  /** confirm, back, folder, tabPrev, tabNext, menu */
-  buttons: Record<"confirm" | "back" | "folder" | "tabPrev" | "tabNext" | "menu", boolean>;
+  /** confirm, back, folder, tabPrev, tabNext, menu, voice (кнопка 8: Back/View/Share/Create) */
+  buttons: Record<"confirm" | "back" | "folder" | "tabPrev" | "tabNext" | "menu" | "voice", boolean>;
   dir: Dir;
 }
 
@@ -63,7 +65,7 @@ function readState(pad: Gamepad): PadState {
     let dir: Dir = b(12) ? "up" : b(13) ? "down" : b(14) ? "left" : b(15) ? "right" : null;
     dir ??= stickDir(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
     return {
-      buttons: { confirm: b(0), back: b(1), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9) },
+      buttons: { confirm: b(0), back: b(1), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9), voice: b(8) },
       dir,
     };
   }
@@ -72,13 +74,13 @@ function readState(pad: Gamepad): PadState {
     let dir = hatDir(pad.axes[9]);
     dir ??= stickDir(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
     return {
-      buttons: { confirm: b(1), back: b(2), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9) },
+      buttons: { confirm: b(1), back: b(2), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9), voice: b(8) },
       dir,
     };
   }
   // неизвестный нестандартный геймпад — лучшее предположение
   return {
-    buttons: { confirm: b(0), back: b(1), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9) },
+    buttons: { confirm: b(0), back: b(1), folder: b(3), tabPrev: b(4), tabNext: b(5), menu: b(9), voice: b(8) },
     dir: stickDir(pad.axes[0] ?? 0, pad.axes[1] ?? 0),
   };
 }
