@@ -27,6 +27,10 @@ dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
 log = "0.4"
+# Геймпады: Xbox/XInput через gilrs, DualSense/DualShock 4 — напрямую по HID
+# (WebView2 и Windows.Gaming.Input читают DualSense по Bluetooth некорректно)
+gilrs = "0.11"
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(windows)'.dependencies]
 winvd = "0.0.49"

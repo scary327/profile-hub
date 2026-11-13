@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod core;
 mod desktop;
+mod gamepad;
 mod games;
 mod models;
 mod processes;
@@ -10,7 +11,7 @@ mod util;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::WindowEvent;
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Открыть хаб", true, None::<&str>)?;
@@ -89,6 +90,7 @@ pub fn run() {
             if !std::env::args().any(|a| a == "--minimized") {
                 core::show_hub(&handle);
             }
+            gamepad::spawn(handle.clone());
             // прогреть кэш игр в фоне
             std::thread::spawn(move || {
                 core::games(&handle, false);
@@ -127,6 +129,8 @@ pub fn run() {
             commands::exit_game_mode,
             commands::hide_hub,
             commands::quit_app,
+            commands::debug_log,
+            commands::get_gamepad_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

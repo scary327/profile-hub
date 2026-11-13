@@ -294,6 +294,17 @@ pub async fn hide_hub(app: AppHandle) {
 }
 
 #[tauri::command]
+pub async fn get_gamepad_info() -> crate::gamepad::PadInfo {
+    crate::gamepad::current_info()
+}
+
+/// Диагностика из фронтенда в общий лог.
+#[tauri::command]
+pub async fn debug_log(msg: String) {
+    log::info!("[ui] {msg}");
+}
+
+#[tauri::command]
 pub async fn quit_app(app: AppHandle) {
     app.exit(0);
 }
