@@ -38,10 +38,14 @@ function HubInner() {
   const [saving, setSaving] = useState(false);
   const [pendingNav, setPendingNav] = useState<{ run: () => void } | null>(null);
   const [kindPicker, setKindPicker] = useState(false);
-  const [switching, setSwitching] = useState<Profile | null>(null);
+  const [switching, setSwitching] = useState<{ to: Profile; from: Profile | null } | null>(null);
+  /** Новый профиль создаётся из баннера «учётка не привязана» — после сохранения привязать к нему текущую учётку. */
+  const [linkCurrentOnCreate, setLinkCurrentOnCreate] = useState(false);
 
   const profiles = useMemo(() => state?.config.profiles ?? [], [state]);
-  const activeId = state?.config.activeProfileId ?? null;
+  /** Профиль учётки, в которой запущен хаб («вы здесь»). */
+  const currentId = state?.currentProfileId ?? null;
+  const activeId = currentId;
   const saved = profiles.find((p) => p.id === selectedId) ?? null;
   const dirty = !!draft && (isNew || !profilesEqual(draft, baseline));
 
@@ -76,6 +80,10 @@ function HubInner() {
     if (!dirty && !profilesEqual(saved, baseline, true)) {
       setDraft(saved);
       setBaseline(saved);
+    } else if (dirty && (saved.windowsUser?.sid ?? null) !== (draft?.windowsUser?.sid ?? null)) {
+      // учётку привязали/отвязали, пока есть несохранённые правки, — подтягиваем только её
+      setDraft((d) => (d ? { ...d, windowsUser: saved.windowsUser } : d));
+      setBaseline((b) => (b ? { ...b, windowsUser: saved.windowsUser } : b));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -104,10 +112,15 @@ function HubInner() {
     });
   };
 
-  const createProfile = async (kind: ProfileKind) => {
+  const createProfile = async (kind: ProfileKind, forCurrentUser = false) => {
     setKindPicker(false);
     try {
       const template = await api.newProfileTemplate(kind);
+      setLinkCurrentOnCreate(forCurrentUser);
+      if (forCurrentUser && state) {
+        const cu = state.currentUser;
+        template.name = (cu.fullName || cu.username).slice(0, 40);
+      }
       loadDraft(template, true);
       setView("profile");
     } catch (e) {
@@ -123,10 +136,20 @@ function HubInner() {
     }
     setSaving(true);
     try {
+      // учёткой управляют отдельные команды — отправляем ту привязку, что сейчас в бэкенде
       const latest = state?.config.profiles.find((p) => p.id === draft.id);
-      const toSave: Profile = { ...draft, name: draft.name.trim(), desktopId: latest?.desktopId ?? draft.desktopId };
-      const res = await api.saveProfile(toSave);
+      const toSave: Profile = { ...draft, name: draft.name.trim(), windowsUser: latest?.windowsUser ?? null };
+      let res = await api.saveProfile(toSave);
       setState(res);
+      if (isNew && linkCurrentOnCreate) {
+        setLinkCurrentOnCreate(false);
+        try {
+          res = await api.linkCurrentUser(draft.id);
+          setState(res);
+        } catch (e) {
+          toast.error(e, "Профиль создан, но привязать учётку не удалось");
+        }
+      }
       const fresh = res.config.profiles.find((p) => p.id === draft.id) ?? toSave;
       loadDraft(fresh);
       toast.show({ kind: "success", title: isNew ? "Профиль создан" : "Изменения сохранены", icon: fresh.icon });
@@ -137,11 +160,28 @@ function HubInner() {
     } finally {
       setSaving(false);
     }
-  }, [draft, state, isNew, setState, loadDraft, toast]);
+  }, [draft, state, isNew, linkCurrentOnCreate, setState, loadDraft, toast]);
 
   const revert = () => {
-    if (isNew) loadDraft(profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null);
-    else loadDraft(saved);
+    if (isNew) {
+      setLinkCurrentOnCreate(false);
+      loadDraft(profiles.find((p) => p.id === activeId) ?? profiles[0] ?? null);
+    } else loadDraft(saved);
+  };
+
+  const linkCurrentTo = async (profileId: string) => {
+    try {
+      const res = await api.linkCurrentUser(profileId);
+      setState(res);
+      const p = res.config.profiles.find((x) => x.id === profileId);
+      toast.show({ kind: "success", title: `Учётка привязана к профилю «${p?.name ?? ""}»`, icon: p?.icon });
+      guard(() => {
+        loadDraft(p ?? null);
+        setView("profile");
+      });
+    } catch (e) {
+      toast.error(e, "Не удалось привязать учётку");
+    }
   };
 
   const deleteProfile = async (deleteData: boolean) => {
@@ -153,7 +193,7 @@ function HubInner() {
     try {
       const res = await api.deleteProfile(draft.id, deleteData);
       setState(res);
-      const next = res.config.profiles.find((p) => p.id === res.config.activeProfileId) ?? res.config.profiles[0] ?? null;
+      const next = res.config.profiles.find((p) => p.id === res.currentProfileId) ?? res.config.profiles[0] ?? null;
       loadDraft(next);
       toast.show({ kind: "success", title: `Профиль «${draft.name}» удалён` });
     } catch (e) {
@@ -166,24 +206,32 @@ function HubInner() {
     async (id: string) => {
       const target = profiles.find((p) => p.id === id);
       if (!target || switchBusy.current) return;
+      if (id === currentId) {
+        toast.show({ kind: "info", title: `Вы уже в профиле «${target.name}»`, icon: target.icon });
+        return;
+      }
+      if (!target.windowsUser) {
+        toast.show({ kind: "error", title: "Сначала создайте учётку", text: `У профиля «${target.name}» нет своей учётки Windows` });
+        return;
+      }
       switchBusy.current = true;
-      setSwitching(target);
+      setSwitching({ to: target, from: profiles.find((p) => p.id === currentId) ?? null });
       const started = performance.now();
       try {
         const res: HubState = await api.switchProfile(id);
         setState(res);
-        toast.show({ kind: "success", title: `Вы в профиле «${target.name}»`, icon: target.icon });
       } catch (e) {
         toast.error(e, "Не удалось переключиться");
       } finally {
-        const left = Math.max(0, 750 - (performance.now() - started));
+        // дать прочитать подсказку, какого пользователя выбрать на экране входа
+        const left = Math.max(0, 2500 - (performance.now() - started));
         window.setTimeout(() => {
           setSwitching(null);
           switchBusy.current = false;
         }, left);
       }
     },
-    [profiles, setState, toast],
+    [profiles, currentId, setState, toast],
   );
 
   // Глобальные клавиши хаба: Esc — скрыть, 1–9 — переключение, Ctrl+S — сохранить.
@@ -227,8 +275,7 @@ function HubInner() {
       <div className="hub__body">
         <Sidebar
           profiles={profiles}
-          activeId={activeId}
-          runningIds={state?.runningProfiles ?? []}
+          state={state}
           selectedId={view === "profile" ? selectedId : null}
           draft={isNew ? draft : null}
           view={view}
@@ -237,6 +284,13 @@ function HubInner() {
           onView={openView}
         />
         <main className="hub__main">
+          {state && !state.currentProfileId && (
+            <UnlinkedBanner
+              state={state}
+              onLink={(id) => void linkCurrentTo(id)}
+              onCreate={() => guard(() => void createProfile("work", true))}
+            />
+          )}
           {!state ? (
             <div className="hub__loading">
               {error ? (
@@ -264,7 +318,8 @@ function HubInner() {
               state={state}
               dirty={dirty}
               saving={saving}
-              isActive={draft.id === activeId}
+              isNew={isNew}
+              isCurrent={!isNew && draft.id === currentId}
               isRunning={state.runningProfiles.includes(draft.id)}
               onChange={(patch) => setDraft((d) => (d ? { ...d, ...patch } : d))}
               onSave={() => void save()}
@@ -328,7 +383,48 @@ function HubInner() {
         </Dialog>
       )}
 
-      {switching && <SwitchOverlay profile={switching} />}
+      {switching && <SwitchOverlay profile={switching.to} from={switching.from} />}
+    </div>
+  );
+}
+
+/** Хаб открыт в учётке Windows, которая не привязана ни к одному профилю. */
+function UnlinkedBanner({ state, onLink, onCreate }: { state: HubState; onLink: (id: string) => void; onCreate: () => void }) {
+  const free = state.config.profiles.filter((p) => !p.windowsUser);
+  const [pick, setPick] = useState("");
+  const chosen = free.some((p) => p.id === pick) ? pick : (free[0]?.id ?? "");
+  return (
+    <div className="link-banner" role="alert">
+      <div className="link-banner__icon">👤</div>
+      <div className="link-banner__text">
+        <div className="link-banner__title">
+          Эта учётка Windows (<span className="mono">{state.currentUser.username}</span>) не привязана ни к одному профилю
+        </div>
+        <div className="link-banner__sub">
+          Привяжите её к профилю — тогда переключение, автозапуск браузеров и приложений профиля заработают в ней.
+        </div>
+      </div>
+      <div className="link-banner__actions">
+        {free.length > 0 ? (
+          <>
+            <select className="input input--sm" value={chosen} onChange={(e) => setPick(e.target.value)} aria-label="Профиль для привязки">
+              {free.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.icon} {p.name || "Без имени"}
+                </option>
+              ))}
+            </select>
+            <button className="btn btn--sm btn--primary" disabled={!chosen} onClick={() => onLink(chosen)}>
+              <Icon name="link" size={13} /> Привязать
+            </button>
+          </>
+        ) : (
+          <span className="muted small">Все профили уже со своими учётками</span>
+        )}
+        <button className="btn btn--sm" onClick={onCreate}>
+          <Icon name="plus" size={13} /> Новый профиль для неё
+        </button>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,3 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 import { api, type HubState, type Settings } from "../api";
 import { Dialog } from "../components/Dialog";
@@ -43,14 +42,6 @@ export function SettingsPage({ state, onState }: { state: HubState; onState: (s:
     }
   };
 
-  const pickRoot = async () => {
-    try {
-      const dir = await open({ title: "Корень данных профилей", directory: true, multiple: false, defaultPath: draft.profilesRoot || undefined });
-      if (typeof dir === "string") set("profilesRoot", dir);
-    } catch (e) {
-      toast.error(e);
-    }
-  };
 
   return (
     <div className="page">
@@ -96,37 +87,11 @@ export function SettingsPage({ state, onState }: { state: HubState; onState: (s:
         </div>
 
         <div className="card">
-          <div className="card__title">Данные профилей</div>
-          <div className="setting">
-            <div className="setting__text">
-              <div className="setting__title">Корневая папка</div>
-              <div className="setting__sub">Здесь хранятся данные браузеров и проекты профилей по умолчанию</div>
-            </div>
-          </div>
-          <div className="row">
-            <div className="path-line path-line--box" title={draft.profilesRoot}>
-              <Icon name="folder" size={15} />
-              <span>{draft.profilesRoot}</span>
-            </div>
-            <button className="btn" onClick={() => void pickRoot()}>
-              Изменить
-            </button>
-          </div>
-        </div>
-
-        <div className="card">
           <div className="card__title">Система</div>
           <div className="setting">
             <div className="setting__text">
-              <div className="setting__title">Запускать вместе с Windows</div>
-              <div className="setting__sub">Хаб стартует свёрнутым в трей</div>
-            </div>
-            <Toggle checked={draft.launchOnStartup} onChange={(v) => set("launchOnStartup", v)} label="Автозапуск" />
-          </div>
-          <div className="setting">
-            <div className="setting__text">
-              <div className="setting__title">Менять тему Windows</div>
-              <div className="setting__sub">При переключении применять светлую или тёмную тему профиля</div>
+              <div className="setting__title">Применять тему профиля при входе</div>
+              <div className="setting__sub">Включать светлую или тёмную тему Windows, выбранную в профиле</div>
             </div>
             <Toggle checked={draft.applyWindowsTheme} onChange={(v) => set("applyWindowsTheme", v)} label="Тема Windows" />
           </div>

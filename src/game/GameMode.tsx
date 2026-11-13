@@ -365,7 +365,16 @@ function GameModeInner() {
   const from = Math.max(0, fIdx - 2);
   const to = Math.min(list.length, fIdx + visibleAfter);
 
-  const activeProfile = hub?.config.profiles.find((p) => p.id === hub.config.activeProfileId) ?? null;
+  const activeProfile =
+    hub?.config.profiles.find((p) => p.id === (hub.currentProfileId ?? hub.config.activeProfileId)) ?? null;
+  // рабочий профиль, куда ведёт «Вернуться к работе»; если он в другой учётке — переход через экран входа
+  const workProfile = hub
+    ? (hub.config.profiles.find((p) => p.id === hub.config.prevWorkProfileId) ?? hub.config.profiles.find((p) => p.kind === "work"))
+    : undefined;
+  const workUser =
+    workProfile?.windowsUser && hub && workProfile.windowsUser.sid.toLowerCase() !== hub.currentUser.sid.toLowerCase()
+      ? workProfile.windowsUser.username
+      : null;
   const rootStyle = {
     "--accent": accent,
     "--accent-rgb": hexToRgbTriplet(accent),
@@ -551,6 +560,7 @@ function GameModeInner() {
           now={now}
           onPick={(id) => void pickMenu(id)}
           onHover={setMenuIdx}
+          workUser={workUser}
         />
       )}
 

@@ -9,7 +9,7 @@ import { baseName } from "../profileUtils";
 
 const EXE_FILTERS = [{ name: "Программы и ярлыки", extensions: ["exe", "lnk", "bat", "cmd"] }];
 
-export function AppsTab({ draft, saved, update }: TabProps) {
+export function AppsTab({ draft, saved, isCurrent, update }: TabProps) {
   const toast = useToast();
 
   const pickExe = async (): Promise<string | null> => {
@@ -46,7 +46,13 @@ export function AppsTab({ draft, saved, update }: TabProps) {
     <div className="stack">
       <div className="card card--list">
         <div className="list-head">
-          <div className="list-head__title">Приложения профиля</div>
+          <div>
+            <div className="list-head__title">Приложения профиля</div>
+            <div className="muted small">
+              С автозапуском откроются при входе в учётку профиля.
+              {saved && !isCurrent && " Запустить вручную — когда вы в этом профиле."}
+            </div>
+          </div>
           <button className="btn btn--sm btn--primary" onClick={() => void add()}>
             <Icon name="plus" size={14} /> Добавить
           </button>
@@ -92,14 +98,19 @@ export function AppsTab({ draft, saved, update }: TabProps) {
                   Автозапуск
                 </label>
                 <div className="row">
-                  <button
-                    className="btn btn--sm"
-                    disabled={!isSaved}
-                    title={isSaved ? "Запустить в этом профиле" : "Сохраните профиль, чтобы запустить"}
-                    onClick={() => void launch(app)}
+                  <span
+                    title={
+                      !isSaved
+                        ? "Сохраните профиль, чтобы запустить"
+                        : !isCurrent
+                          ? "Запустится в учётке профиля — сначала переключитесь в него"
+                          : "Запустить"
+                    }
                   >
-                    <Icon name="play" size={11} /> Запустить
-                  </button>
+                    <button className="btn btn--sm" disabled={!isSaved || !isCurrent} onClick={() => void launch(app)}>
+                      <Icon name="play" size={11} /> Запустить
+                    </button>
+                  </span>
                   <button className="icon-btn icon-btn--danger" title="Убрать из профиля" onClick={() => remove(app.id)}>
                     <Icon name="trash" size={15} />
                   </button>

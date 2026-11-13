@@ -4,24 +4,29 @@ import { Dialog } from "../components/Dialog";
 import { Icon, type IconName } from "../components/Icon";
 import { useToast } from "../components/Toasts";
 import { hotkeyParts } from "../lib/hotkey";
+import { AccountTab } from "./tabs/AccountTab";
 import { AppsTab } from "./tabs/AppsTab";
 import { BrowsersTab } from "./tabs/BrowsersTab";
 import { GeneralTab } from "./tabs/GeneralTab";
 import { ProjectsTab } from "./tabs/ProjectsTab";
 import { WallpaperTab } from "./tabs/WallpaperTab";
-import { KIND_LABEL, accentVars } from "./profileUtils";
+import { KIND_LABEL, accentVars, accountInfo } from "./profileUtils";
 
 export interface TabProps {
   draft: Profile;
   /** Сохранённая версия (null — профиль ещё не сохранён). */
   saved: Profile | null;
   state: HubState;
+  /** Профиль учётки, в которой запущен хаб: запускать/открывать что-то можно только в нём. */
+  isCurrent: boolean;
   update: (patch: Partial<Profile>) => void;
+  onState: (s: HubState) => void;
 }
 
-type TabId = "general" | "wallpaper" | "browsers" | "projects" | "apps";
+type TabId = "account" | "general" | "wallpaper" | "browsers" | "projects" | "apps";
 
 const TABS: Array<{ id: TabId; label: string; icon: IconName }> = [
+  { id: "account", label: "Учётка", icon: "user" },
   { id: "general", label: "Общее", icon: "sliders" },
   { id: "wallpaper", label: "Обои", icon: "image" },
   { id: "browsers", label: "Браузеры", icon: "globe" },
@@ -35,7 +40,9 @@ interface Props {
   state: HubState;
   dirty: boolean;
   saving: boolean;
-  isActive: boolean;
+  isNew: boolean;
+  /** Это профиль учётки, в которой запущен хаб. */
+  isCurrent: boolean;
   isRunning: boolean;
   onChange: (patch: Partial<Profile>) => void;
   onSave: () => void;
@@ -46,9 +53,9 @@ interface Props {
 }
 
 export function ProfileEditor(props: Props) {
-  const { draft, saved, state, dirty, saving, isActive, isRunning, onChange, onSave, onRevert, onSwitch, onState } = props;
+  const { draft, saved, state, dirty, saving, isCurrent, isRunning, onChange, onSave, onRevert, onSwitch, onState } = props;
   const toast = useToast();
-  const [tab, setTab] = useState<TabId>("general");
+  const [tab, setTab] = useState<TabId>(saved?.windowsUser ? "general" : "account");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteData, setDeleteData] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -66,8 +73,18 @@ export function ProfileEditor(props: Props) {
     }
   };
 
-  const tabProps: TabProps = { draft, saved, state, update: onChange };
+  const tabProps: TabProps = { draft, saved, state, isCurrent, update: onChange, onState };
   const hk = hotkeyParts(saved?.hotkey);
+  const account = saved?.windowsUser ?? null;
+  const accStatus = saved ? accountInfo(state, saved).status : "none";
+
+  const switchTitle = !saved
+    ? "Сначала сохраните профиль"
+    : isCurrent
+      ? "Вы уже в учётке этого профиля"
+      : !account
+        ? "Сначала создайте учётку — вкладка «Учётка»"
+        : `Откроется экран входа Windows — выберите «${account.username}»`;
 
   return (
     <div className="editor" style={accentVars(draft.color)}>
@@ -87,16 +104,23 @@ export function ProfileEditor(props: Props) {
             <span className={`badge badge--${draft.kind}`}>{KIND_LABEL[draft.kind]}</span>
             {!saved ? (
               <span className="hero__state">Новый профиль</span>
-            ) : isActive ? (
+            ) : isCurrent ? (
               <span className="hero__state hero__state--active">
-                <span className="live-dot" /> Активный профиль
+                <span className="live-dot" /> Вы сейчас здесь
               </span>
-            ) : isRunning ? (
+            ) : isRunning || accStatus === "loggedIn" ? (
               <span className="hero__state">
-                <span className="live-dot live-dot--muted" /> Работает в фоне
+                <span className="live-dot live-dot--muted" /> Сеанс открыт в фоне
               </span>
+            ) : account ? (
+              <span className="hero__state">Не в системе</span>
             ) : (
-              <span className="hero__state">Неактивен</span>
+              <span className="hero__state hero__state--warn">Нет учётки Windows</span>
+            )}
+            {account && (
+              <span className="hero__state" title="Учётка Windows профиля">
+                <Icon name="user" size={13} /> <span className="mono">{account.username}</span>
+              </span>
             )}
             {hk.length > 0 && (
               <span className="kbd-row" title="Глобальный хоткей профиля">
@@ -110,15 +134,12 @@ export function ProfileEditor(props: Props) {
           </div>
         </div>
         <div className="hero__actions">
-          <button
-            className="btn btn--switch"
-            disabled={!saved || isActive}
-            onClick={onSwitch}
-            title={!saved ? "Сначала сохраните профиль" : isActive ? "Вы уже в этом профиле" : "Переключиться на профиль"}
-          >
-            <Icon name="swap" size={17} />
-            {isActive ? "Вы здесь" : "Переключиться"}
-          </button>
+          <span title={switchTitle}>
+            <button className="btn btn--switch" disabled={!saved || isCurrent || !account} onClick={onSwitch}>
+              <Icon name="swap" size={17} />
+              {isCurrent ? "Вы в этом профиле" : "Переключиться"}
+            </button>
+          </span>
         </div>
       </section>
 
@@ -151,6 +172,7 @@ export function ProfileEditor(props: Props) {
       </div>
 
       <div className="editor__content" key={tab}>
+        {tab === "account" && <AccountTab {...tabProps} />}
         {tab === "general" && <GeneralTab {...tabProps} />}
         {tab === "wallpaper" && <WallpaperTab {...tabProps} />}
         {tab === "browsers" && <BrowsersTab {...tabProps} />}
@@ -195,7 +217,7 @@ export function ProfileEditor(props: Props) {
                 className="btn btn--danger-solid"
                 onClick={async () => {
                   setConfirmDelete(false);
-                  await props.onDelete(deleteData);
+                  await props.onDelete(deleteData && !!account && !isCurrent);
                 }}
               >
                 {saved ? "Удалить" : "Отменить создание"}
@@ -205,20 +227,33 @@ export function ProfileEditor(props: Props) {
         >
           {saved ? (
             <>
-              <p style={{ marginTop: 0 }}>Профиль исчезнет из хаба, его виртуальный рабочий стол будет закрыт.</p>
-              <label className="check">
-                <input type="checkbox" checked={deleteData} onChange={(e) => setDeleteData(e.target.checked)} />
+              <p style={{ marginTop: 0 }}>
+                Профиль исчезнет из хаба.
+                {account && " Без галочки ниже его учётка Windows останется — в неё по-прежнему можно войти."}
+              </p>
+              <label className={`check${!account || isCurrent ? " is-disabled" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={deleteData && !!account && !isCurrent}
+                  disabled={!account || isCurrent}
+                  onChange={(e) => setDeleteData(e.target.checked)}
+                />
                 <span>
-                  Удалить также данные (браузеры, проекты)
+                  Удалить учётку Windows и все её файлы (необратимо)
                   <span className="check__hint">
-                    Папки с данными браузеров и проектов будут удалены безвозвратно.
+                    {!account
+                      ? "У профиля нет своей учётки Windows."
+                      : isCurrent
+                        ? "Нельзя удалить учётку, в которой вы сейчас."
+                        : `Пользователь ${account.username} будет удалён вместе с папкой C:\\Users\\${account.username}. Windows запросит подтверждение (UAC).`}
                   </span>
                 </span>
               </label>
-              {deleteData && (
+              {deleteData && account && !isCurrent && (
                 <div className="callout callout--danger">
-                  Будут стёрты логины, куки, история браузеров профиля и папка проектов:{" "}
-                  <span className="mono">{saved.projectsDir}</span>
+                  Будут стёрты все файлы учётки <span className="mono">{account.username}</span>: документы, рабочий стол,
+                  проекты (<span className="mono">{saved.projectsDir}</span>), логины, куки и история браузеров. Восстановить
+                  их будет нельзя.
                 </div>
               )}
             </>

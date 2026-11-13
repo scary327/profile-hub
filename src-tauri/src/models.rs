@@ -17,16 +17,40 @@ pub enum ThemeMode {
     Light,
 }
 
-/// Что делать с приложениями профиля, когда уходим из него.
+/// Что делать с сеансом Windows профиля, когда уходим из него.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum LeaveBehavior {
-    /// Оставить окна на своём виртуальном столе.
+    /// Оставить сеанс работать в фоне (всё открытое остаётся как было).
     Keep,
-    /// Закрыть (WM_CLOSE) браузеры и приложения профиля.
-    Close,
-    /// Закрыть только при переходе в игровой профиль.
-    CloseOnGaming,
+    /// Выйти из учётки (все программы профиля закрываются, память освобождается).
+    #[serde(alias = "close")]
+    SignOut,
+    /// Выходить из учётки только при переходе в игровой профиль.
+    #[serde(alias = "closeOnGaming")]
+    SignOutOnGaming,
+}
+
+/// Учётная запись Windows, привязанная к профилю.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsUser {
+    pub sid: String,
+    pub username: String,
+}
+
+/// Локальный пользователь Windows (для списка в UI).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinUserInfo {
+    pub sid: String,
+    pub username: String,
+    pub full_name: String,
+    pub enabled: bool,
+    /// У пользователя сейчас есть сеанс (вошёл в систему, активен или в фоне).
+    pub logged_in: bool,
+    /// Это пользователь текущего сеанса.
+    pub is_current: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -81,9 +105,9 @@ pub struct Profile {
     pub on_leave: LeaveBehavior,
     /// Глобальный хоткей для прямого переключения, напр. "Ctrl+Alt+1".
     pub hotkey: Option<String>,
-    /// GUID виртуального стола (заполняется бэкендом).
+    /// Учётная запись Windows профиля. None — ещё не создана/не привязана.
     #[serde(default)]
-    pub desktop_id: Option<String>,
+    pub windows_user: Option<WindowsUser>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +149,9 @@ pub struct AppConfig {
     /// gameId -> unix-время последнего запуска через хаб (секунды).
     #[serde(default)]
     pub last_played: std::collections::HashMap<String, u64>,
+    /// Последний рабочий профиль — куда возвращаться из игрового режима.
+    #[serde(default)]
+    pub prev_work_profile_id: Option<String>,
 }
 
 /// Информация о браузере, найденном в системе.
@@ -196,8 +223,14 @@ pub struct LauncherInfo {
 pub struct HubState {
     pub config: AppConfig,
     pub browsers: Vec<BrowserInfo>,
-    /// id профилей, у которых сейчас есть запущенные приложения/браузеры.
+    /// id профилей, чья учётка сейчас в системе (есть сеанс Windows).
     pub running_profiles: Vec<String>,
     /// Хоткеи, которые не удалось зарегистрировать (заняты другой программой).
     pub busy_hotkeys: Vec<String>,
+    /// Пользователь текущего сеанса.
+    pub current_user: WinUserInfo,
+    /// Профиль, привязанный к текущему пользователю (None — учётка не привязана).
+    pub current_profile_id: Option<String>,
+    /// Все локальные пользователи Windows (для привязки к профилю).
+    pub windows_users: Vec<WinUserInfo>,
 }

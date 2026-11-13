@@ -607,96 +607,138 @@ html[data-window="game"] {
   gap: calc(10 * var(--u));
 }
 
+/* ---------- значки кнопок ----------
+ * Один размер везде (--glyph), содержимое центрируется flex'ом, без влияния line-height/baseline
+ * родителя. Ряды со значками (подсказки, кнопки, меню) — inline-flex + align-items:center.
+ */
 .glyph {
-  display: inline-grid;
-  place-items: center;
+  --glyph: calc(32 * var(--u));
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
-  font-weight: 700;
+  height: var(--glyph);
+  min-width: var(--glyph);
   line-height: 1;
+  font-weight: 700;
+  font-size: calc(var(--glyph) * 0.44);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0;
+  vertical-align: middle;
+  color: #fff;
 }
 
+.glyph__svg {
+  display: block;
+  width: calc(var(--glyph) * 0.6);
+  height: calc(var(--glyph) * 0.6);
+  overflow: visible;
+}
+
+/* текст режется до высоты прописных: центрируются сами буквы, а не строка с выносными элементами */
+.glyph__text {
+  display: block;
+  line-height: 1;
+  text-box: trim-both cap alphabetic;
+}
+
+/* круглая кнопка геймпада */
 .glyph--pad {
-  width: calc(32 * var(--u));
-  height: calc(32 * var(--u));
+  width: var(--glyph);
   border-radius: 50%;
-  font-size: calc(16 * var(--u));
   background: rgb(255 255 255 / 0.12);
   box-shadow: inset 0 0 0 calc(1.5 * var(--u)) rgb(255 255 255 / 0.35);
-  color: #fff;
+}
+
+.glyph--ps .glyph__svg {
+  width: calc(var(--glyph) * 0.74);
+  height: calc(var(--glyph) * 0.74);
+}
+
+.glyph--ps {
+  background: rgb(20 22 30 / 0.55);
 }
 
 .glyph--ps-cross {
   color: #8ab4ff;
-  font-size: calc(17 * var(--u));
 }
 
 .glyph--ps-circle {
   color: #ff7a85;
-  font-size: calc(20 * var(--u));
 }
 
 .glyph--ps-triangle {
   color: #5fe0b7;
-  font-size: calc(15 * var(--u));
 }
 
-.glyph--ps-options,
-.glyph--xb-menu {
-  font-size: calc(16 * var(--u));
+.glyph--xb {
+  box-shadow: none;
 }
 
 .glyph--xb-a {
   background: #2f9e44;
-  box-shadow: none;
 }
 
 .glyph--xb-b {
   background: #d9363e;
-  box-shadow: none;
 }
 
 .glyph--xb-y {
   background: #e0a800;
-  box-shadow: none;
 }
 
+/* бамперы L1/R1/LB/RB и Options — скруглённый прямоугольник той же высоты */
 .glyph--shoulder {
-  width: auto;
-  min-width: calc(44 * var(--u));
-  padding: 0 calc(8 * var(--u));
-  border-radius: calc(8 * var(--u));
-  font-size: calc(14 * var(--u));
+  width: calc(var(--glyph) * 1.375);
+  border-radius: calc(var(--glyph) * 0.25);
+  font-size: calc(var(--glyph) * 0.4);
+  background: rgb(255 255 255 / 0.12);
+  box-shadow: inset 0 0 0 calc(1.5 * var(--u)) rgb(255 255 255 / 0.35);
 }
 
-.glyph--dpad {
-  font-size: calc(20 * var(--u));
-  background: transparent;
-  box-shadow: none;
+.glyph--shoulder--icon .glyph__svg {
+  width: calc(var(--glyph) * 0.55);
+  height: calc(var(--glyph) * 0.55);
 }
 
+/* крестовина — без подложки */
+.glyph--bare {
+  width: var(--glyph);
+}
+
+.glyph--bare .glyph__svg {
+  width: calc(var(--glyph) * 0.82);
+  height: calc(var(--glyph) * 0.82);
+}
+
+/* клавиша клавиатуры */
 .glyph--key {
-  min-width: calc(32 * var(--u));
-  height: calc(30 * var(--u));
-  padding: 0 calc(9 * var(--u));
-  border-radius: calc(7 * var(--u));
-  font-size: calc(14 * var(--u));
-  font-family: "Segoe UI", system-ui, sans-serif;
+  padding: 0 calc(var(--glyph) * 0.3);
+  border-radius: calc(var(--glyph) * 0.22);
+  font-size: calc(var(--glyph) * 0.42);
+  font-weight: 650;
   background: rgb(255 255 255 / 0.12);
   box-shadow:
     inset 0 0 0 1px rgb(255 255 255 / 0.2),
     inset 0 calc(-2 * var(--u)) 0 rgb(255 255 255 / 0.1);
 }
 
-.gm-btn--play .glyph--pad,
-.gm-btn--play .glyph--key {
+.glyph--key--icon {
+  padding: 0;
+  width: var(--glyph);
+}
+
+/* на белой кнопке «Играть» */
+.gm-btn--play .glyph--key,
+.gm-btn--play .glyph--pad:not(.glyph--ps):not(.glyph--xb) {
   background: rgb(0 0 0 / 0.1);
   box-shadow: inset 0 0 0 calc(1.5 * var(--u)) rgb(0 0 0 / 0.25);
   color: #0a0a0a;
 }
 
-.gm-btn--play .glyph--xb-a {
-  background: #2f9e44;
-  color: #fff;
+.gm-btn--play .glyph--ps {
+  background: #16171d;
   box-shadow: none;
 }
 
@@ -823,7 +865,7 @@ html[data-window="game"] {
   color: rgb(255 255 255 / 0.7);
 }
 
-.sysmenu__foot span {
+.sysmenu__foot > span {
   display: inline-flex;
   align-items: center;
   gap: calc(10 * var(--u));

@@ -22,9 +22,11 @@ interface Props {
   now: Date;
   onPick: (id: string) => void;
   onHover: (i: number) => void;
+  /** Рабочий профиль в другой учётке: возврат идёт через экран входа Windows. */
+  workUser: string | null;
 }
 
-export function SystemMenu({ index, device, profile, now, onPick, onHover }: Props) {
+export function SystemMenu({ index, device, profile, now, onPick, onHover, workUser }: Props) {
   return (
     <div className="sysmenu">
       <div className="sysmenu__panel">
@@ -49,8 +51,10 @@ export function SystemMenu({ index, device, profile, now, onPick, onHover }: Pro
             >
               <span className="sysmenu__icon">{it.icon}</span>
               <span className="sysmenu__text">
-                <span className="sysmenu__label">{it.label}</span>
-                <span className="sysmenu__hint">{it.hint}</span>
+                <span className="sysmenu__label">{it.id === "exit" && workUser ? "Вернуться к работе (экран входа)" : it.label}</span>
+                <span className="sysmenu__hint">
+                  {it.id === "exit" && workUser ? `Откроется экран входа Windows — выберите «${workUser}»` : it.hint}
+                </span>
               </span>
             </button>
           ))}

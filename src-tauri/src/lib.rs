@@ -8,6 +8,7 @@ mod games;
 mod models;
 mod processes;
 mod util;
+mod winusers;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -74,10 +75,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--minimized"]),
-        ))
         .manage(core::AppState::new())
         .setup(|app| {
             setup_tray(app)?;
@@ -86,9 +83,11 @@ pub fn run() {
             if !failed.is_empty() {
                 log::warn!("не удалось занять хоткеи: {failed:?}");
             }
-            // хаб закрепляется на всех рабочих столах при показе (см. core::show_hub)
-            if !std::env::args().any(|a| a == "--minimized") {
-                core::show_hub(&handle);
+            // --autostart: запуск при входе в Windows (ключ Run, который ставит установщик)
+            let at_sign_in = std::env::args().any(|a| a == "--autostart" || a == "--minimized");
+            {
+                let h = handle.clone();
+                std::thread::spawn(move || core::on_session_start(&h, at_sign_in));
             }
             gamepad::spawn(handle.clone());
             // прогреть кэш игр в фоне
@@ -131,6 +130,10 @@ pub fn run() {
             commands::quit_app,
             commands::debug_log,
             commands::get_gamepad_info,
+            commands::create_windows_user,
+            commands::link_current_user,
+            commands::link_windows_user,
+            commands::unlink_windows_user,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

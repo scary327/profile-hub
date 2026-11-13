@@ -7,7 +7,7 @@ import { hashGradient, initials } from "../../lib/hash";
 import { relativeTime } from "../../lib/time";
 import type { TabProps } from "../ProfileEditor";
 
-export function ProjectsTab({ draft, saved, update }: TabProps) {
+export function ProjectsTab({ draft, saved, isCurrent, update }: TabProps) {
   const toast = useToast();
   const [projects, setProjects] = useState<ProjectEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -15,7 +15,8 @@ export function ProjectsTab({ draft, saved, update }: TabProps) {
   const [creating, setCreating] = useState(false);
   const [filter, setFilter] = useState("");
 
-  const savedId = saved?.id ?? null;
+  // папка проектов лежит в домашней папке учётки профиля — работаем с ней только изнутри этой учётки
+  const savedId = saved && isCurrent ? saved.id : null;
   const savedDir = saved?.projectsDir ?? null;
 
   const load = useCallback(async () => {
@@ -72,9 +73,11 @@ export function ProjectsTab({ draft, saved, update }: TabProps) {
         <div className="row">
           <div className="path-line path-line--box" title={draft.projectsDir}>
             <Icon name="folder" size={15} />
-            <span>{draft.projectsDir || <span className="muted">не задана</span>}</span>
+            <span>
+              {draft.projectsDir || <span className="muted">появится после привязки учётки (C:\Users\&lt;имя&gt;\Projects)</span>}
+            </span>
           </div>
-          {saved && !dirChanged && (
+          {saved && isCurrent && !dirChanged && draft.projectsDir && (
             <button className="btn" onClick={() => run(() => api.openProjectsDir(saved.id))}>
               Открыть
             </button>
@@ -91,6 +94,22 @@ export function ProjectsTab({ draft, saved, update }: TabProps) {
           <div className="empty empty--sm">
             <div className="empty__icon">📁</div>
             <div className="empty__text">Сохраните профиль, чтобы создавать и открывать проекты.</div>
+          </div>
+        </div>
+      ) : !isCurrent ? (
+        <div className="card">
+          <div className="empty empty--sm">
+            <div className="empty__icon">🔒</div>
+            <div className="empty__text">
+              Проекты лежат в учётке профиля
+              {saved.windowsUser ? (
+                <>
+                  {" "}
+                  <span className="mono">{saved.windowsUser.username}</span>
+                </>
+              ) : null}{" "}
+              — список, создание и открытие доступны, когда вы в этом профиле.
+            </div>
           </div>
         </div>
       ) : (

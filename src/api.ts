@@ -6,7 +6,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type ProfileKind = "work" | "gaming";
 export type ThemeMode = "dark" | "light";
-export type LeaveBehavior = "keep" | "close" | "closeOnGaming";
+/** Что делать с сеансом Windows профиля при уходе из него. */
+export type LeaveBehavior = "keep" | "signOut" | "signOutOnGaming";
 export type BrowserKind = "chrome" | "edge" | "firefox" | "opera" | "operaGx" | "brave" | "yandex";
 export type GameSource = "steam" | "epic" | "gog" | "ubisoft" | "ea" | "battleNet" | "manual";
 
@@ -36,7 +37,25 @@ export interface Profile {
   apps: ProfileApp[];
   onLeave: LeaveBehavior;
   hotkey: string | null; // "Ctrl+Alt+1"
-  desktopId: string | null;
+  /** Учётка Windows профиля; null — ещё не создана/не привязана. */
+  windowsUser: WindowsUser | null;
+}
+
+/** Каждый профиль — отдельный пользователь Windows. */
+export interface WindowsUser {
+  sid: string;
+  username: string;
+}
+
+export interface WinUserInfo {
+  sid: string;
+  username: string;
+  fullName: string;
+  enabled: boolean;
+  /** Есть сеанс (вошёл, активен или в фоне). */
+  loggedIn: boolean;
+  /** Пользователь текущего сеанса. */
+  isCurrent: boolean;
 }
 
 export interface ManualGame {
@@ -62,6 +81,7 @@ export interface AppConfig {
   activeProfileId: string | null;
   manualGames: ManualGame[];
   lastPlayed: Record<string, number>;
+  prevWorkProfileId: string | null;
 }
 
 export interface BrowserInfo {
@@ -74,9 +94,14 @@ export interface BrowserInfo {
 export interface HubState {
   config: AppConfig;
   browsers: BrowserInfo[];
+  /** Профили, чья учётка сейчас в системе. */
   runningProfiles: string[];
   /** Хоткеи, занятые другими программами. */
   busyHotkeys: string[];
+  currentUser: WinUserInfo;
+  /** Профиль текущей учётки; null — учётка не привязана ни к одному профилю. */
+  currentProfileId: string | null;
+  windowsUsers: WinUserInfo[];
 }
 
 export interface Game {
@@ -116,8 +141,22 @@ export const api = {
   newProfileTemplate: (kind: ProfileKind) => invoke<Profile>("new_profile_template", { kind }),
   /** Создать или обновить профиль (по id). */
   saveProfile: (profile: Profile) => invoke<HubState>("save_profile", { profile }),
+  /** deleteData=true — удалить и учётку Windows профиля вместе с её папкой (UAC). Текущую учётку удалить нельзя. */
   deleteProfile: (id: string, deleteData: boolean) => invoke<HubState>("delete_profile", { id, deleteData }),
+  /**
+   * Перейти в профиль. Если это другая учётка — текущий сеанс уходит на экран входа Windows,
+   * где нужно выбрать пользователя профиля и войти (PIN/пароль). Команда успевает вернуть состояние до этого.
+   */
   switchProfile: (id: string) => invoke<HubState>("switch_profile", { id }),
+
+  /** Создать учётку Windows для профиля (запрос UAC). password=null — без пароля. */
+  createWindowsUser: (profileId: string, username: string, password: string | null) =>
+    invoke<HubState>("create_windows_user", { profileId, username, password }),
+  /** Привязать к профилю учётку текущего сеанса. */
+  linkCurrentUser: (profileId: string) => invoke<HubState>("link_current_user", { profileId }),
+  /** Привязать к профилю существующую учётку по SID. */
+  linkWindowsUser: (profileId: string, sid: string) => invoke<HubState>("link_windows_user", { profileId, sid }),
+  unlinkWindowsUser: (profileId: string) => invoke<HubState>("unlink_windows_user", { profileId }),
   saveSettings: (settings: Settings) => invoke<HubState>("save_settings", { settings }),
 
   launchBrowser: (profileId: string, kind: BrowserKind) => invoke<void>("launch_browser", { profileId, kind }),

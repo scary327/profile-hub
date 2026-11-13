@@ -1,57 +1,11 @@
-//! Поиск и аккуратное закрытие процессов, принадлежащих профилю.
+//! Аккуратное закрытие программ, запущенных хабом в текущей учётке.
 
 use std::collections::HashSet;
-use std::path::Path;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, GW_OWNER,
     WM_CLOSE,
 };
-
-/// Снимок процессов: PID + командная строка в нижнем регистре.
-pub struct Snapshot(Vec<(u32, String)>);
-
-impl Snapshot {
-    pub fn take() -> Self {
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
-        );
-        Snapshot(
-            sys.processes()
-                .iter()
-                .map(|(pid, p)| {
-                    let cmd = p
-                        .cmd()
-                        .iter()
-                        .map(|a| a.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .to_lowercase();
-                    (pid.as_u32(), cmd)
-                })
-                .collect(),
-        )
-    }
-
-    /// PID'ы процессов профиля: живые из `tracked` + все, чья командная строка
-    /// содержит папку данных профиля (браузеры с --user-data-dir / -profile).
-    pub fn profile_pids(&self, profile_data_dir: &Path, tracked: &[u32]) -> HashSet<u32> {
-        let needle = profile_data_dir.to_string_lossy().to_lowercase();
-        self.0
-            .iter()
-            .filter(|(pid, cmd)| tracked.contains(pid) || cmd.contains(&needle))
-            .map(|(pid, _)| *pid)
-            .collect()
-    }
-
-    pub fn alive(&self, pid: u32) -> bool {
-        self.0.iter().any(|(p, _)| *p == pid)
-    }
-}
 
 struct EnumCtx<'a> {
     pids: &'a HashSet<u32>,
@@ -70,8 +24,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
     1
 }
 
-/// Послать WM_CLOSE всем видимым окнам верхнего уровня этих процессов —
-/// как будто пользователь нажал «крестик» (браузеры сохранят сессию).
+/// Послать WM_CLOSE видимым окнам этих процессов — как «крестик».
 /// Возвращает число закрытых окон.
 pub fn close_windows(pids: &HashSet<u32>) -> usize {
     if pids.is_empty() {

@@ -6,7 +6,7 @@ import { Toggle } from "../../components/Toggle";
 import type { TabProps } from "../ProfileEditor";
 import { BROWSER_COLORS, BROWSER_GLYPH } from "../profileUtils";
 
-export function BrowsersTab({ draft, saved, state, update }: TabProps) {
+export function BrowsersTab({ draft, saved, state, isCurrent, update }: TabProps) {
   const toast = useToast();
 
   const setEnabled = (kind: BrowserKind, on: boolean) => {
@@ -20,7 +20,7 @@ export function BrowsersTab({ draft, saved, state, update }: TabProps) {
     if (!saved) return;
     try {
       await api.launchBrowser(saved.id, kind);
-      toast.show({ kind: "success", title: `${name} запускается`, text: `В профиле «${saved.name}»` });
+      toast.show({ kind: "success", title: `${name} запускается` });
     } catch (e) {
       toast.error(e, `Не удалось запустить ${name}`);
     }
@@ -28,14 +28,16 @@ export function BrowsersTab({ draft, saved, state, update }: TabProps) {
 
   return (
     <div className="stack">
-      <div className="callout">
-        <Icon name="sparkles" size={16} />
-        <div>
-          У каждого профиля — свои папки данных браузеров. Аккаунты, куки, расширения и история не пересекаются
-          между профилями: войдите в рабочий Google здесь, и он не появится в игровом.
-        </div>
-      </div>
       <div className="card card--list">
+        <div className="list-head">
+          <div>
+            <div className="list-head__title">Браузеры профиля</div>
+            <div className="muted small">
+              Включённые браузеры с автозапуском откроются при входе в учётку профиля.
+              {saved && !isCurrent && " Кнопка «Открыть» работает, когда вы в этом профиле."}
+            </div>
+          </div>
+        </div>
         {state.browsers.length === 0 && <div className="empty-row">Браузеры не найдены</div>}
         {state.browsers.map((b) => {
           const entry = draft.browsers.find((x) => x.kind === b.kind);
@@ -59,14 +61,23 @@ export function BrowsersTab({ draft, saved, state, update }: TabProps) {
                 </label>
               )}
               {b.installed && (
-                <button
-                  className="btn btn--sm"
-                  disabled={!saved || !savedEnabled}
-                  title={!saved || !savedEnabled ? "Включите браузер и сохраните профиль" : "Открыть в этом профиле"}
-                  onClick={() => void launch(b.kind, b.name)}
+                <span
+                  title={
+                    !saved || !savedEnabled
+                      ? "Включите браузер и сохраните профиль"
+                      : !isCurrent
+                        ? "Откроется в учётке профиля — сначала переключитесь в него"
+                        : "Открыть браузер"
+                  }
                 >
-                  <Icon name="play" size={11} /> Открыть
-                </button>
+                  <button
+                    className="btn btn--sm"
+                    disabled={!saved || !savedEnabled || !isCurrent}
+                    onClick={() => void launch(b.kind, b.name)}
+                  >
+                    <Icon name="play" size={11} /> Открыть
+                  </button>
+                </span>
               )}
               <Toggle checked={enabled} disabled={!b.installed} onChange={(v) => setEnabled(b.kind, v)} label={`Включить ${b.name}`} />
             </div>

@@ -1,49 +1,68 @@
-//! Состояние приложения и основная логика: переключение профилей, игровой режим, хоткеи.
+//! Состояние приложения и основная логика.
+//!
+//! Модель: каждый профиль — отдельная учётка Windows. Hub запущен в каждой учётке
+//! (общий конфиг в ProgramData). «Текущий профиль» — тот, к которому привязана учётка
+//! этого сеанса. Переход в другой профиль = экран входа Windows (сеанс остаётся в фоне)
+//! или выход из учётки — по настройке профиля.
 
 use crate::models::*;
-use crate::processes::Snapshot;
-use crate::{browsers, config, desktop, games, processes, util};
-use anyhow::{anyhow, Result};
+use crate::{browsers, config, desktop, games, processes, util, winusers};
+use anyhow::{anyhow, bail, Result};
 use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+const USERS_CACHE_TTL: Duration = Duration::from_secs(15);
+
 pub struct AppState {
+    /// SID и имя пользователя этого сеанса.
+    pub sid: String,
+    pub username: String,
     pub config: Mutex<AppConfig>,
     pub browsers: Mutex<Vec<BrowserInfo>>,
     pub games: Mutex<Option<Vec<Game>>>,
-    /// PID'ы приложений, запущенных хабом, по id профиля.
-    pub tracked: Mutex<HashMap<String, Vec<u32>>>,
-    /// Последний рабочий профиль — куда возвращаться из игрового режима.
-    pub prev_work: Mutex<Option<String>>,
-    /// Сериализует переключения (хоткей + клик одновременно).
-    pub switching: Mutex<()>,
-    /// Хоткеи, занятые другими программами (по результату последней регистрации).
+    /// PID'ы программ, запущенных хабом в этом сеансе.
+    pub tracked: Mutex<Vec<u32>>,
     pub busy_hotkeys: Mutex<Vec<String>>,
+    users_cache: Mutex<Option<(Instant, Vec<WinUserInfo>)>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let cfg = config::load();
-        let prev_work = cfg
-            .active_profile_id
-            .clone()
-            .filter(|id| cfg.profiles.iter().any(|p| &p.id == id && p.kind == ProfileKind::Work));
+        let (sid, username) = winusers::current_user().unwrap_or_else(|e| {
+            log::error!("не удалось определить пользователя: {e:#}");
+            (String::new(), std::env::var("USERNAME").unwrap_or_default())
+        });
+        let cfg = config::load(&sid, &username);
         AppState {
+            sid,
+            username,
             config: Mutex::new(cfg),
             browsers: Mutex::new(browsers::detect()),
             games: Mutex::new(None),
-            tracked: Mutex::new(HashMap::new()),
-            prev_work: Mutex::new(prev_work),
-            switching: Mutex::new(()),
+            tracked: Mutex::new(Vec::new()),
             busy_hotkeys: Mutex::new(Vec::new()),
+            users_cache: Mutex::new(None),
         }
     }
 
-    pub fn profiles_root(&self) -> PathBuf {
-        PathBuf::from(&self.config.lock().settings.profiles_root)
+    /// Подтянуть изменения, сделанные Hub'ом в другой учётке.
+    pub fn refresh_config(&self) {
+        if let Some(cfg) = config::reload() {
+            *self.config.lock() = cfg;
+        }
+    }
+
+    /// Прочитать с диска → изменить → записать.
+    pub fn update_config<T>(&self, f: impl FnOnce(&mut AppConfig) -> Result<T>) -> Result<T> {
+        let mut cfg = config::reload().unwrap_or_else(|| self.config.lock().clone());
+        let out = f(&mut cfg)?;
+        config::save(&cfg)?;
+        *self.config.lock() = cfg;
+        Ok(out)
     }
 
     pub fn profile(&self, id: &str) -> Result<Profile> {
@@ -56,8 +75,49 @@ impl AppState {
             .ok_or_else(|| anyhow!("профиль не найден"))
     }
 
-    pub fn save_config(&self) -> Result<()> {
-        config::save(&self.config.lock())
+    /// Профиль, привязанный к учётке этого сеанса.
+    pub fn current_profile(&self) -> Option<Profile> {
+        self.config
+            .lock()
+            .profiles
+            .iter()
+            .find(|p| p.windows_user.as_ref().is_some_and(|u| u.sid == self.sid))
+            .cloned()
+    }
+
+    pub fn is_current(&self, p: &Profile) -> bool {
+        p.windows_user.as_ref().is_some_and(|u| u.sid == self.sid)
+    }
+
+    pub fn windows_users(&self, force: bool) -> Vec<WinUserInfo> {
+        let mut cache = self.users_cache.lock();
+        if !force {
+            if let Some((at, list)) = cache.as_ref() {
+                if at.elapsed() < USERS_CACHE_TTL {
+                    // сеансы меняются чаще списка учёток — их обновляем всегда
+                    let sessions: Vec<String> =
+                        winusers::logged_in_usernames().into_iter().map(|n| n.to_lowercase()).collect();
+                    return list
+                        .iter()
+                        .cloned()
+                        .map(|mut u| {
+                            u.logged_in = sessions.contains(&u.username.to_lowercase());
+                            u
+                        })
+                        .collect();
+                }
+            }
+        }
+        match winusers::list_users(&self.sid) {
+            Ok(list) => {
+                *cache = Some((Instant::now(), list.clone()));
+                list
+            }
+            Err(e) => {
+                log::warn!("список учёток: {e:#}");
+                cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+            }
+        }
     }
 }
 
@@ -65,30 +125,43 @@ pub fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
     app.state::<AppState>()
 }
 
-fn data_dir(root: &Path, id: &str) -> PathBuf {
-    config::profile_data_dir(root, id)
+pub fn hub_state(app: &AppHandle) -> HubState {
+    hub_state_ex(app, false)
 }
 
-pub fn hub_state(app: &AppHandle) -> HubState {
+pub fn hub_state_ex(app: &AppHandle, force_users: bool) -> HubState {
     let st = state(app);
+    st.refresh_config();
     let cfg = st.config.lock().clone();
-    let root = PathBuf::from(&cfg.settings.profiles_root);
-    let snap = Snapshot::take();
-    let running_profiles = {
-        let mut tracked = st.tracked.lock();
-        // выбросить умершие PID'ы
-        for pids in tracked.values_mut() {
-            pids.retain(|p| snap.alive(*p));
-        }
-        cfg.profiles
-            .iter()
-            .filter(|p| {
-                let t = tracked.get(&p.id).map(Vec::as_slice).unwrap_or(&[]);
-                !snap.profile_pids(&data_dir(&root, &p.id), t).is_empty()
-            })
-            .map(|p| p.id.clone())
-            .collect()
-    };
+    let windows_users = st.windows_users(force_users);
+    let logged: HashSet<String> = windows_users
+        .iter()
+        .filter(|u| u.logged_in)
+        .map(|u| u.sid.clone())
+        .collect();
+    let running_profiles = cfg
+        .profiles
+        .iter()
+        .filter(|p| p.windows_user.as_ref().is_some_and(|u| logged.contains(&u.sid)))
+        .map(|p| p.id.clone())
+        .collect();
+    let current_user = windows_users
+        .iter()
+        .find(|u| u.is_current)
+        .cloned()
+        .unwrap_or_else(|| WinUserInfo {
+            sid: st.sid.clone(),
+            username: st.username.clone(),
+            full_name: String::new(),
+            enabled: true,
+            logged_in: true,
+            is_current: true,
+        });
+    let current_profile_id = cfg
+        .profiles
+        .iter()
+        .find(|p| p.windows_user.as_ref().is_some_and(|u| u.sid == st.sid))
+        .map(|p| p.id.clone());
     let browsers = st.browsers.lock().clone();
     let busy_hotkeys = st.busy_hotkeys.lock().clone();
     HubState {
@@ -96,6 +169,9 @@ pub fn hub_state(app: &AppHandle) -> HubState {
         browsers,
         running_profiles,
         busy_hotkeys,
+        current_user,
+        current_profile_id,
+        windows_users,
     }
 }
 
@@ -104,20 +180,12 @@ pub fn emit_state(app: &AppHandle) {
     let _ = app.emit("state-changed", s);
 }
 
-fn hwnd_of(w: &WebviewWindow) -> Option<isize> {
-    w.hwnd().ok().map(|h| h.0 as isize)
-}
-
 // ---------- окна ----------
 
 pub fn show_hub(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
-        // закреплять можно только видимое окно — делаем при каждом показе (дёшево)
-        if let Some(h) = hwnd_of(&w) {
-            desktop::pin_window(h);
-        }
         let _ = w.set_focus();
     }
 }
@@ -153,14 +221,12 @@ fn game_window(app: &AppHandle) -> Result<WebviewWindow> {
     Ok(w)
 }
 
-fn show_game_window(app: &AppHandle, desk: Option<winvd::Desktop>) -> Result<()> {
+pub fn show_game_window(app: &AppHandle) -> Result<()> {
     let w = game_window(app)?;
     w.show()?;
-    if let (Some(d), Some(h)) = (desk, hwnd_of(&w)) {
-        desktop::move_window(h, d);
-    }
     let _ = w.set_fullscreen(true);
     let _ = w.set_focus();
+    hide_hub(app);
     Ok(())
 }
 
@@ -170,18 +236,25 @@ fn hide_game_window(app: &AppHandle) {
     }
 }
 
-// ---------- приложения профиля ----------
+fn game_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("game")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
 
-pub fn track(app: &AppHandle, profile_id: &str, pid: u32) {
-    state(app)
-        .tracked
-        .lock()
-        .entry(profile_id.to_string())
-        .or_default()
-        .push(pid);
+// ---------- программы профиля (только в его учётке) ----------
+
+fn require_current(app: &AppHandle, profile_id: &str) -> Result<Profile> {
+    let st = state(app);
+    let p = st.profile(profile_id)?;
+    if !st.is_current(&p) {
+        bail!("Это можно сделать только в учётке профиля «{}»", p.name);
+    }
+    Ok(p)
 }
 
 pub fn launch_browser(app: &AppHandle, profile_id: &str, kind: BrowserKind) -> Result<()> {
+    require_current(app, profile_id)?;
     let st = state(app);
     let info = st
         .browsers
@@ -190,180 +263,302 @@ pub fn launch_browser(app: &AppHandle, profile_id: &str, kind: BrowserKind) -> R
         .find(|b| b.kind == kind)
         .cloned()
         .ok_or_else(|| anyhow!("браузер не найден"))?;
-    let dir = browsers::data_dir(&st.profiles_root(), profile_id, kind);
-    let pid = browsers::launch(&info, &dir)?;
-    track(app, profile_id, pid);
+    let pid = browsers::launch(&info)?;
+    st.tracked.lock().push(pid);
     Ok(())
 }
 
 pub fn launch_app(app: &AppHandle, profile_id: &str, app_id: &str) -> Result<()> {
-    let p = state(app).profile(profile_id)?;
+    let p = require_current(app, profile_id)?;
     let a = p
         .apps
         .iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| anyhow!("приложение не найдено"))?;
     let pid = util::spawn_detached(&a.path, &util::split_args(&a.args), None)?;
-    track(app, profile_id, pid);
+    state(app).tracked.lock().push(pid);
     Ok(())
 }
 
-/// Закрыть окна всех приложений профиля. Возвращает число закрытых окон.
-pub fn close_profile_apps(app: &AppHandle, profile_id: &str) -> usize {
-    let st = state(app);
-    let root = st.profiles_root();
-    let tracked = st.tracked.lock().get(profile_id).cloned().unwrap_or_default();
-    let pids = Snapshot::take().profile_pids(&data_dir(&root, profile_id), &tracked);
-    let n = processes::close_windows(&pids);
-    st.tracked.lock().remove(profile_id);
-    n
+/// Закрыть окна программ, запущенных хабом в этой учётке.
+pub fn close_profile_apps(app: &AppHandle, profile_id: &str) -> Result<usize> {
+    require_current(app, profile_id)?;
+    let pids: HashSet<u32> = std::mem::take(&mut *state(app).tracked.lock()).into_iter().collect();
+    Ok(processes::close_windows(&pids))
 }
 
-fn is_running(app: &AppHandle, profile_id: &str) -> bool {
-    let st = state(app);
-    let root = st.profiles_root();
-    let tracked = st.tracked.lock().get(profile_id).cloned().unwrap_or_default();
-    !Snapshot::take()
-        .profile_pids(&data_dir(&root, profile_id), &tracked)
-        .is_empty()
-}
-
-fn autostart(app: &AppHandle, p: &Profile) {
-    for b in p.browsers.iter().filter(|b| b.autostart) {
-        if let Err(e) = launch_browser(app, &p.id, b.kind) {
-            log::warn!("автозапуск браузера: {e}");
+fn apply_appearance(p: &Profile, apply_theme: bool) {
+    if let Some(wp) = p.wallpaper.as_deref().filter(|w| Path::new(w).is_file()) {
+        if let Err(e) = desktop::set_wallpaper(wp) {
+            log::warn!("обои: {e:#}");
         }
     }
-    for a in p.apps.iter().filter(|a| a.autostart) {
-        if let Err(e) = launch_app(app, &p.id, &a.id) {
-            log::warn!("автозапуск {}: {e}", a.name);
+    if apply_theme {
+        if let Err(e) = desktop::apply_theme(p.theme == ThemeMode::Light) {
+            log::warn!("тема: {e:#}");
         }
+    }
+}
+
+/// Применить оформление профиля сразу, если профиль — текущей учётки.
+pub fn apply_if_current(app: &AppHandle, p: &Profile) {
+    let st = state(app);
+    if st.is_current(p) {
+        let theme = st.config.lock().settings.apply_windows_theme;
+        apply_appearance(p, theme);
+    }
+}
+
+/// Вызывается при запуске Hub. `at_sign_in` — запуск при входе в Windows (--autostart).
+pub fn on_session_start(app: &AppHandle, at_sign_in: bool) {
+    let st = state(app);
+    let Some(p) = st.current_profile() else {
+        log::info!("учётка {} не привязана ни к одному профилю", st.username);
+        show_hub(app);
+        return;
+    };
+    log::info!("сеанс профиля «{}» (учётка {})", p.name, st.username);
+    let theme = st.config.lock().settings.apply_windows_theme;
+    apply_appearance(&p, theme);
+    let id = p.id.clone();
+    let _ = st.update_config(|cfg| {
+        cfg.active_profile_id = Some(id);
+        Ok(())
+    });
+    if at_sign_in {
+        for b in p.browsers.iter().filter(|b| b.autostart) {
+            if let Err(e) = launch_browser(app, &p.id, b.kind) {
+                log::warn!("автозапуск браузера: {e:#}");
+            }
+        }
+        for a in p.apps.iter().filter(|a| a.autostart) {
+            if let Err(e) = launch_app(app, &p.id, &a.id) {
+                log::warn!("автозапуск {}: {e:#}", a.name);
+            }
+        }
+    }
+    if p.kind == ProfileKind::Gaming {
+        if let Err(e) = show_game_window(app) {
+            log::error!("игровой режим: {e:#}");
+        }
+    } else if !at_sign_in {
+        show_hub(app);
     }
 }
 
 // ---------- переключение ----------
 
-fn should_close(on_leave: LeaveBehavior, target: ProfileKind) -> bool {
+fn sign_out_on_leave(on_leave: LeaveBehavior, target: ProfileKind) -> bool {
     match on_leave {
         LeaveBehavior::Keep => false,
-        LeaveBehavior::Close => true,
-        LeaveBehavior::CloseOnGaming => target == ProfileKind::Gaming,
+        LeaveBehavior::SignOut => true,
+        LeaveBehavior::SignOutOnGaming => target == ProfileKind::Gaming,
     }
 }
 
 pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
     let st = state(app);
-    let t0 = std::time::Instant::now();
-    let _guard = st.switching.lock();
-    let ms = |label: &str| log::debug!("switch: {label} @ {} мс", t0.elapsed().as_millis());
-    ms("lock");
-
+    st.refresh_config();
     let target = st.profile(id)?;
-    let (prev, settings, owned_desktops) = {
-        let cfg = st.config.lock();
-        let prev = cfg
-            .active_profile_id
-            .as_ref()
-            .and_then(|pid| cfg.profiles.iter().find(|p| &p.id == pid))
-            .cloned();
-        let owned: Vec<String> = cfg.profiles.iter().filter_map(|p| p.desktop_id.clone()).collect();
-        (prev, cfg.settings.clone(), owned)
+    let Some(target_user) = target.windows_user.clone() else {
+        bail!("Сначала создайте учётку Windows для профиля «{}»", target.name);
     };
 
-    ms("start");
-    // 1. уходим из старого профиля
-    if let Some(prev) = prev.as_ref().filter(|p| p.id != target.id) {
-        if should_close(prev.on_leave, target.kind) {
-            let n = close_profile_apps(app, &prev.id);
-            log::info!("закрыто окон профиля {}: {n}", prev.name);
+    // та же учётка — переключаться некуда
+    if target_user.sid == st.sid {
+        if target.kind == ProfileKind::Gaming {
+            show_game_window(app)?;
+        } else {
+            hide_game_window(app);
+            hide_hub(app);
         }
+        return Ok(());
     }
 
-    // 2. рабочий стол профиля. Самый первый профиль «забирает» текущий стол,
-    //    если ни один профиль ещё не владеет существующим столом.
-    let any_owned_exists = owned_desktops.iter().any(|d| desktop::find(d).is_some());
-    let label = format!("{} {}", target.icon, target.name);
-    let (desk, desk_id) = desktop::ensure(target.desktop_id.as_deref(), &label, !any_owned_exists)?;
-
-    if let Some(wp) = target.wallpaper.as_deref().filter(|w| Path::new(w).is_file()) {
-        if let Err(e) = desktop::set_wallpaper(&desk, wp) {
-            log::warn!("обои: {e}");
-        }
-    }
-    ms("desktop ready");
-    desktop::switch(desk)?;
-    ms("desktop switched");
-
-    if settings.apply_windows_theme {
-        if let Err(e) = desktop::apply_theme(target.theme == ThemeMode::Light) {
-            log::warn!("тема: {e}");
-        }
-    }
-
-    // 3. сохранить
-    {
-        let mut cfg = st.config.lock();
-        if let Some(p) = cfg.profiles.iter_mut().find(|p| p.id == target.id) {
-            p.desktop_id = Some(desk_id);
-        }
+    let current = st.current_profile();
+    st.update_config(|cfg| {
         cfg.active_profile_id = Some(target.id.clone());
-    }
-    st.save_config()?;
-    if target.kind == ProfileKind::Work {
-        *st.prev_work.lock() = Some(target.id.clone());
-    }
-
-    // 4. автозапуск, если профиль ещё не запущен
-    if !is_running(app, &target.id) {
-        autostart(app, &target);
-    }
-
-    ms("autostart checked");
-    // 5. окна
+        if let Some(c) = current.as_ref().filter(|c| c.kind == ProfileKind::Work) {
+            cfg.prev_work_profile_id = Some(c.id.clone());
+        }
+        Ok(())
+    })?;
+    let sign_out = current
+        .as_ref()
+        .is_some_and(|c| sign_out_on_leave(c.on_leave, target.kind));
+    log::info!(
+        "переход в профиль «{}» (учётка {}), {}",
+        target.name,
+        target_user.username,
+        if sign_out { "выход из текущей учётки" } else { "текущий сеанс остаётся в фоне" }
+    );
     hide_hub(app);
-    match target.kind {
-        ProfileKind::Gaming => show_game_window(app, Some(desk))?,
-        ProfileKind::Work => hide_game_window(app),
-    }
-
-    ms("windows done");
-    emit_state(app);
-    ms("state emitted");
+    hide_game_window(app);
+    // дать UI получить ответ команды, затем уйти на экран входа
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        let res = if sign_out { winusers::sign_out() } else { winusers::disconnect_to_sign_in() };
+        if let Err(e) = res {
+            log::error!("{e:#}");
+        }
+    });
     Ok(())
 }
 
+fn gaming_profile(app: &AppHandle) -> Option<Profile> {
+    let st = state(app);
+    let cfg = st.config.lock();
+    let gaming = cfg.profiles.iter().filter(|p| p.kind == ProfileKind::Gaming);
+    // предпочитаем игровой профиль с учёткой
+    gaming
+        .clone()
+        .find(|p| p.windows_user.is_some())
+        .or_else(|| gaming.clone().next())
+        .cloned()
+}
+
 pub fn enter_game_mode(app: &AppHandle) -> Result<()> {
-    let gaming = state(app)
-        .config
-        .lock()
-        .profiles
-        .iter()
-        .find(|p| p.kind == ProfileKind::Gaming)
-        .map(|p| p.id.clone());
-    match gaming {
-        Some(id) => switch_profile(app, &id),
-        None => {
-            hide_hub(app);
-            show_game_window(app, None)
-        }
+    let st = state(app);
+    st.refresh_config();
+    match gaming_profile(app) {
+        // игровой профиль в другой учётке — переходим туда
+        Some(g) if g.windows_user.as_ref().is_some_and(|u| u.sid != st.sid) => switch_profile(app, &g.id),
+        // игровой профиль — эта учётка, или учётки у него ещё нет: открываем библиотеку здесь
+        _ => show_game_window(app),
     }
 }
 
 pub fn exit_game_mode(app: &AppHandle) -> Result<()> {
     let st = state(app);
-    let back = st.prev_work.lock().clone().or_else(|| {
-        st.config
-            .lock()
-            .profiles
-            .iter()
-            .find(|p| p.kind == ProfileKind::Work)
-            .map(|p| p.id.clone())
-    });
+    st.refresh_config();
     hide_game_window(app);
+    let back = {
+        let cfg = st.config.lock();
+        let has_other_account =
+            |p: &&Profile| p.windows_user.as_ref().is_some_and(|u| u.sid != st.sid);
+        cfg.prev_work_profile_id
+            .as_ref()
+            .and_then(|id| cfg.profiles.iter().find(|p| &p.id == id))
+            .filter(has_other_account)
+            .or_else(|| cfg.profiles.iter().filter(|p| p.kind == ProfileKind::Work).find(has_other_account))
+            .map(|p| p.id.clone())
+    };
     match back {
         Some(id) => switch_profile(app, &id),
-        None => Ok(()),
+        None => Ok(()), // работа в этой же учётке — просто закрыли окно игр
     }
+}
+
+// ---------- учётки ----------
+
+fn ensure_unowned(cfg: &AppConfig, profile_id: &str, sid: &str) -> Result<()> {
+    if let Some(other) = cfg
+        .profiles
+        .iter()
+        .find(|p| p.id != profile_id && p.windows_user.as_ref().is_some_and(|u| u.sid == sid))
+    {
+        bail!("Эта учётка уже привязана к профилю «{}»", other.name);
+    }
+    Ok(())
+}
+
+fn link(app: &AppHandle, profile_id: &str, user: WindowsUser) -> Result<()> {
+    let st = state(app);
+    st.update_config(|cfg| {
+        ensure_unowned(cfg, profile_id, &user.sid)?;
+        let p = cfg
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow!("Сначала сохраните профиль"))?;
+        if p.projects_dir.trim().is_empty() {
+            p.projects_dir = config::default_projects_dir(&user.username);
+        }
+        p.windows_user = Some(user);
+        Ok(())
+    })?;
+    register_hotkeys(app);
+    Ok(())
+}
+
+pub fn create_windows_user(app: &AppHandle, profile_id: &str, username: &str, password: Option<&str>) -> Result<()> {
+    let st = state(app);
+    let profile = st.profile(profile_id).map_err(|_| anyhow!("Сначала сохраните профиль"))?;
+    if profile.windows_user.is_some() {
+        bail!("У профиля уже есть учётка");
+    }
+    winusers::validate_username(username)?;
+    if st
+        .windows_users(true)
+        .iter()
+        .any(|u| u.username.eq_ignore_ascii_case(username))
+    {
+        bail!("Пользователь «{username}» уже существует — выберите его в «Выбрать существующую»");
+    }
+    let password = password.filter(|p| !p.is_empty());
+    let sid = winusers::create_user(username, &profile.name, password)?;
+    log::info!("создана учётка {username} для профиля «{}»", profile.name);
+    link(app, profile_id, WindowsUser { sid, username: username.to_string() })?;
+    st.windows_users(true);
+    Ok(())
+}
+
+pub fn link_current_user(app: &AppHandle, profile_id: &str) -> Result<()> {
+    let st = state(app);
+    let user = WindowsUser { sid: st.sid.clone(), username: st.username.clone() };
+    link(app, profile_id, user)?;
+    if let Ok(p) = st.profile(profile_id) {
+        apply_if_current(app, &p);
+    }
+    Ok(())
+}
+
+pub fn link_windows_user(app: &AppHandle, profile_id: &str, sid: &str) -> Result<()> {
+    let st = state(app);
+    let u = st
+        .windows_users(true)
+        .into_iter()
+        .find(|u| u.sid == sid)
+        .ok_or_else(|| anyhow!("Учётка не найдена"))?;
+    link(app, profile_id, WindowsUser { sid: u.sid, username: u.username })
+}
+
+pub fn unlink_windows_user(app: &AppHandle, profile_id: &str) -> Result<()> {
+    state(app).update_config(|cfg| {
+        let p = cfg
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| anyhow!("профиль не найден"))?;
+        p.windows_user = None;
+        Ok(())
+    })
+}
+
+pub fn delete_profile(app: &AppHandle, id: &str, delete_account: bool) -> Result<()> {
+    let st = state(app);
+    let p = st.profile(id)?;
+    if delete_account {
+        if let Some(u) = &p.windows_user {
+            if u.sid == st.sid {
+                bail!("Нельзя удалить учётку, в которой вы сейчас находитесь");
+            }
+            winusers::delete_user(&u.sid)?;
+            log::info!("удалена учётка {}", u.username);
+            st.windows_users(true);
+        }
+    }
+    st.update_config(|cfg| {
+        cfg.profiles.retain(|p| p.id != id);
+        for slot in [&mut cfg.active_profile_id, &mut cfg.prev_work_profile_id] {
+            if slot.as_deref() == Some(id) {
+                *slot = None;
+            }
+        }
+        Ok(())
+    })?;
+    register_hotkeys(app);
+    Ok(())
 }
 
 // ---------- игры ----------
@@ -375,7 +570,8 @@ pub fn games(app: &AppHandle, refresh: bool) -> Vec<Game> {
             return g;
         }
     }
-    let (manual, last) = {
+    st.refresh_config();
+    let (manual, last): (Vec<ManualGame>, HashMap<String, u64>) = {
         let cfg = st.config.lock();
         (cfg.manual_games.clone(), cfg.last_played.clone())
     };
@@ -392,8 +588,10 @@ pub fn launch_game(app: &AppHandle, game_id: &str) -> Result<()> {
     games::launch(&game.launch)?;
     let st = state(app);
     let now = util::now_unix();
-    st.config.lock().last_played.insert(game_id.to_string(), now);
-    st.save_config()?;
+    st.update_config(|cfg| {
+        cfg.last_played.insert(game_id.to_string(), now);
+        Ok(())
+    })?;
     if let Some(list) = st.games.lock().as_mut() {
         if let Some(g) = list.iter_mut().find(|g| g.id == game_id) {
             g.last_played = Some(now);
@@ -420,23 +618,13 @@ fn run_action(app: AppHandle, action: HotkeyAction) {
                 Ok(())
             }
             HotkeyAction::GameMode => {
-                let window_visible = app
-                    .get_webview_window("game")
-                    .and_then(|w| w.is_visible().ok())
-                    .unwrap_or(false);
-                let active_is_gaming = {
-                    let st = state(&app);
-                    let cfg = st.config.lock();
-                    cfg.active_profile_id
-                        .as_ref()
-                        .and_then(|id| cfg.profiles.iter().find(|p| &p.id == id))
-                        .map(|p| p.kind == ProfileKind::Gaming)
-                        .unwrap_or(false)
-                };
-                let in_game = window_visible || active_is_gaming;
-                log::info!("хоткей игрового режима: окно видно={window_visible}, активен игровой={active_is_gaming}");
-                if in_game {
+                let in_gaming_account =
+                    state(&app).current_profile().is_some_and(|p| p.kind == ProfileKind::Gaming);
+                if game_window_visible(&app) {
                     exit_game_mode(&app)
+                } else if in_gaming_account {
+                    // в игровой учётке хоткей просто возвращает библиотеку
+                    show_game_window(&app)
                 } else {
                     enter_game_mode(&app)
                 }
@@ -444,7 +632,7 @@ fn run_action(app: AppHandle, action: HotkeyAction) {
             HotkeyAction::Switch(id) => switch_profile(&app, &id),
         };
         if let Err(e) = res {
-            log::error!("хоткей: {e}");
+            log::error!("хоткей: {e:#}");
             let _ = app.emit("backend-error", e.to_string());
         }
     });

@@ -29,18 +29,6 @@ pub fn display_name(kind: BrowserKind) -> &'static str {
     }
 }
 
-fn dir_name(kind: BrowserKind) -> &'static str {
-    match kind {
-        BrowserKind::Chrome => "chrome",
-        BrowserKind::Edge => "edge",
-        BrowserKind::Firefox => "firefox",
-        BrowserKind::Opera => "opera",
-        BrowserKind::OperaGx => "opera-gx",
-        BrowserKind::Brave => "brave",
-        BrowserKind::Yandex => "yandex",
-    }
-}
-
 /// Классифицировать браузер по имени из реестра StartMenuInternet.
 fn classify(name: &str) -> Option<BrowserKind> {
     let n = name.to_lowercase();
@@ -168,26 +156,12 @@ pub fn detect() -> Vec<BrowserInfo> {
         .collect()
 }
 
-/// Папка данных браузера для профиля. Именно она даёт изоляцию аккаунтов/куки/расширений.
-pub fn data_dir(profiles_root: &Path, profile_id: &str, kind: BrowserKind) -> PathBuf {
-    crate::config::profile_data_dir(profiles_root, profile_id)
-        .join("browsers")
-        .join(dir_name(kind))
-}
-
-pub fn launch(info: &BrowserInfo, data_dir: &Path) -> Result<u32> {
+/// Запустить браузер. Изоляция между профилями обеспечивается тем, что
+/// у каждого профиля своя учётка Windows (и свои данные браузеров в ней).
+pub fn launch(info: &BrowserInfo) -> Result<u32> {
     let exe = info
         .exe_path
         .as_deref()
         .ok_or_else(|| anyhow!("{} не установлен", info.name))?;
-    std::fs::create_dir_all(data_dir)?;
-    let dir = data_dir.to_string_lossy().to_string();
-    let args: Vec<String> = match info.kind {
-        BrowserKind::Firefox => vec!["-profile".into(), dir, "-no-remote".into()],
-        _ => vec![
-            format!("--user-data-dir={dir}"),
-            "--no-default-browser-check".into(),
-        ],
-    };
-    util::spawn_detached(exe, &args, None)
+    util::spawn_detached(exe, &[], None)
 }
