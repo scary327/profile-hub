@@ -10,7 +10,7 @@ import { BrowsersTab } from "./tabs/BrowsersTab";
 import { GeneralTab } from "./tabs/GeneralTab";
 import { ProjectsTab } from "./tabs/ProjectsTab";
 import { WallpaperTab } from "./tabs/WallpaperTab";
-import { KIND_LABEL, accentVars, accountInfo } from "./profileUtils";
+import { KIND_LABEL, accentVars, accountInfo, accountSibling, sameAccount } from "./profileUtils";
 
 export interface TabProps {
   draft: Profile;
@@ -77,6 +77,8 @@ export function ProfileEditor(props: Props) {
   const hk = hotkeyParts(saved?.hotkey);
   const account = saved?.windowsUser ?? null;
   const accStatus = saved ? accountInfo(state, saved).status : "none";
+  // профиль в этой же учётке (игры как побочный режим основной) — открывается без экрана входа
+  const inThisAccount = !!saved && !isCurrent && sameAccount(saved, state);
 
   const switchTitle = !saved
     ? "Сначала сохраните профиль"
@@ -84,7 +86,9 @@ export function ProfileEditor(props: Props) {
       ? "Вы уже в учётке этого профиля"
       : !account
         ? "Сначала создайте учётку — вкладка «Учётка»"
-        : `Откроется экран входа Windows — выберите «${account.username}»`;
+        : inThisAccount
+          ? "Профиль в этой же учётке — откроется сразу, без экрана входа"
+          : `Откроется экран входа Windows — выберите «${account.username}»`;
 
   return (
     <div className="editor" style={accentVars(draft.color)}>
@@ -107,6 +111,14 @@ export function ProfileEditor(props: Props) {
             ) : isCurrent ? (
               <span className="hero__state hero__state--active">
                 <span className="live-dot" /> Вы сейчас здесь
+              </span>
+            ) : inThisAccount ? (
+              <span className="hero__state hero__state--active">
+                <span className="live-dot" /> В этой учётке
+                {(() => {
+                  const sib = saved ? accountSibling(state.config.profiles, saved) : null;
+                  return sib ? ` — вместе с «${sib.icon} ${sib.name}»` : "";
+                })()}
               </span>
             ) : isRunning || accStatus === "loggedIn" ? (
               <span className="hero__state">
@@ -137,7 +149,13 @@ export function ProfileEditor(props: Props) {
           <span title={switchTitle}>
             <button className="btn btn--switch" disabled={!saved || isCurrent || !account} onClick={onSwitch}>
               <Icon name="swap" size={17} />
-              {isCurrent ? "Вы в этом профиле" : "Переключиться"}
+              {isCurrent
+                ? "Вы в этом профиле"
+                : inThisAccount
+                  ? draft.kind === "gaming"
+                    ? "Открыть игры"
+                    : "Открыть"
+                  : "Переключиться"}
             </button>
           </span>
         </div>

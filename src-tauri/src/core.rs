@@ -75,15 +75,14 @@ impl AppState {
             .ok_or_else(|| anyhow!("профиль не найден"))
     }
 
-    /// Профиль, привязанный к учётке этого сеанса.
+    /// Профиль учётки этого сеанса. Если в учётке живут рабочий и игровой профили
+    /// (игры — «побочный» режим основной учётки), основной — рабочий.
     pub fn current_profile(&self) -> Option<Profile> {
-        self.config
-            .lock()
-            .profiles
-            .iter()
-            .find(|p| p.windows_user.as_ref().is_some_and(|u| u.sid == self.sid))
-            .cloned()
+        let cfg = self.config.lock();
+        let mine = || cfg.profiles.iter().filter(|p| p.windows_user.as_ref().is_some_and(|u| u.sid == self.sid));
+        mine().find(|p| p.kind == ProfileKind::Work).or_else(|| mine().next()).cloned()
     }
+
 
     pub fn is_current(&self, p: &Profile) -> bool {
         p.windows_user.as_ref().is_some_and(|u| u.sid == self.sid)
@@ -157,11 +156,7 @@ pub fn hub_state_ex(app: &AppHandle, force_users: bool) -> HubState {
             logged_in: true,
             is_current: true,
         });
-    let current_profile_id = cfg
-        .profiles
-        .iter()
-        .find(|p| p.windows_user.as_ref().is_some_and(|u| u.sid == st.sid))
-        .map(|p| p.id.clone());
+    let current_profile_id = st.current_profile().map(|p| p.id);
     let browsers = st.browsers.lock().clone();
     let busy_hotkeys = st.busy_hotkeys.lock().clone();
     HubState {
@@ -300,10 +295,11 @@ fn apply_appearance(p: &Profile, apply_theme: bool) {
     }
 }
 
-/// Применить оформление профиля сразу, если профиль — текущей учётки.
+/// Применить оформление профиля сразу, если это основной профиль текущей учётки
+/// (у игрового профиля, живущего в учётке рабочего, оформление — от рабочего).
 pub fn apply_if_current(app: &AppHandle, p: &Profile) {
     let st = state(app);
-    if st.is_current(p) {
+    if st.current_profile().is_some_and(|c| c.id == p.id) {
         let theme = st.config.lock().settings.apply_windows_theme;
         apply_appearance(p, theme);
     }
@@ -337,13 +333,53 @@ pub fn on_session_start(app: &AppHandle, at_sign_in: bool) {
             }
         }
     }
-    if p.kind == ProfileKind::Gaming {
+    // отдельная игровая учётка — сразу игры; общая — только если просили при переходе
+    if p.kind == ProfileKind::Gaming || take_pending_game_mode(app) {
         if let Err(e) = show_game_window(app) {
             log::error!("игровой режим: {e:#}");
         }
     } else if !at_sign_in {
         show_hub(app);
     }
+}
+
+/// Если переход в игры был запрошен из другой учётки — снять флаг и вернуть true.
+fn take_pending_game_mode(app: &AppHandle) -> bool {
+    let st = state(app);
+    st.refresh_config();
+    if st.config.lock().pending_game_mode_sid.as_deref() != Some(st.sid.as_str()) {
+        return false;
+    }
+    let _ = st.update_config(|cfg| {
+        cfg.pending_game_mode_sid = None;
+        Ok(())
+    });
+    true
+}
+
+/// Следит, когда сеанс этой учётки снова становится активным (вход после экрана входа):
+/// Hub при этом не перезапускается, поэтому «открыть игры после входа» ловим здесь.
+pub fn spawn_session_watcher(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("session-watch".into())
+        .spawn(move || {
+            let mut was_active = winusers::is_session_active();
+            loop {
+                std::thread::sleep(Duration::from_millis(800));
+                let active = winusers::is_session_active();
+                if active && !was_active {
+                    log::info!("сеанс снова активен");
+                    if take_pending_game_mode(&app) {
+                        if let Err(e) = show_game_window(&app) {
+                            log::error!("игровой режим: {e:#}");
+                        }
+                    }
+                    emit_state(&app);
+                }
+                was_active = active;
+            }
+        })
+        .expect("не удалось запустить поток сеанса");
 }
 
 // ---------- переключение ----------
@@ -381,6 +417,9 @@ pub fn switch_profile(app: &AppHandle, id: &str) -> Result<()> {
         if let Some(c) = current.as_ref().filter(|c| c.kind == ProfileKind::Work) {
             cfg.prev_work_profile_id = Some(c.id.clone());
         }
+        // в учётке игрового профиля после входа сразу откроется игровой режим
+        cfg.pending_game_mode_sid =
+            (target.kind == ProfileKind::Gaming).then(|| target_user.sid.clone());
         Ok(())
     })?;
     let sign_out = current
@@ -432,6 +471,10 @@ pub fn exit_game_mode(app: &AppHandle) -> Result<()> {
     let st = state(app);
     st.refresh_config();
     hide_game_window(app);
+    // игры — побочный режим рабочей учётки: просто остаёмся в ней
+    if st.current_profile().is_some_and(|p| p.kind == ProfileKind::Work) {
+        return Ok(());
+    }
     let back = {
         let cfg = st.config.lock();
         let has_other_account =
@@ -451,13 +494,19 @@ pub fn exit_game_mode(app: &AppHandle) -> Result<()> {
 
 // ---------- учётки ----------
 
-fn ensure_unowned(cfg: &AppConfig, profile_id: &str, sid: &str) -> Result<()> {
-    if let Some(other) = cfg
+/// В одной учётке может жить один рабочий профиль и один игровой
+/// (игры как побочный режим основной учётки). Рабочие профили — всегда в разных учётках.
+fn ensure_can_link(cfg: &AppConfig, profile_id: &str, sid: &str) -> Result<()> {
+    let me = cfg.profiles.iter().find(|p| p.id == profile_id);
+    let kind = me.map(|p| p.kind);
+    for other in cfg
         .profiles
         .iter()
-        .find(|p| p.id != profile_id && p.windows_user.as_ref().is_some_and(|u| u.sid == sid))
+        .filter(|p| p.id != profile_id && p.windows_user.as_ref().is_some_and(|u| u.sid == sid))
     {
-        bail!("Эта учётка уже привязана к профилю «{}»", other.name);
+        if Some(other.kind) == kind || kind.is_none() {
+            bail!("Эта учётка уже привязана к профилю «{}»", other.name);
+        }
     }
     Ok(())
 }
@@ -465,7 +514,7 @@ fn ensure_unowned(cfg: &AppConfig, profile_id: &str, sid: &str) -> Result<()> {
 fn link(app: &AppHandle, profile_id: &str, user: WindowsUser) -> Result<()> {
     let st = state(app);
     st.update_config(|cfg| {
-        ensure_unowned(cfg, profile_id, &user.sid)?;
+        ensure_can_link(cfg, profile_id, &user.sid)?;
         let p = cfg
             .profiles
             .iter_mut()
@@ -542,6 +591,12 @@ pub fn delete_profile(app: &AppHandle, id: &str, delete_account: bool) -> Result
         if let Some(u) = &p.windows_user {
             if u.sid == st.sid {
                 bail!("Нельзя удалить учётку, в которой вы сейчас находитесь");
+            }
+            let shared = st.config.lock().profiles.iter().find(|o| {
+                o.id != p.id && o.windows_user.as_ref().is_some_and(|ou| ou.sid == u.sid)
+            }).map(|o| o.name.clone());
+            if let Some(other) = shared {
+                bail!("Учётку {} использует ещё профиль «{other}» — удалите профиль без учётки", u.username);
             }
             winusers::delete_user(&u.sid)?;
             log::info!("удалена учётка {}", u.username);
@@ -671,4 +726,40 @@ pub fn register_hotkeys(app: &AppHandle) -> Vec<String> {
     }
     *state(app).busy_hotkeys.lock() = failed.clone();
     failed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(profiles: Vec<Profile>) -> AppConfig {
+        let mut cfg: AppConfig = serde_json::from_str(
+            r#"{"settings":{"hubHotkey":"","gameHotkey":"","profilesRoot":"","launchOnStartup":true,"applyWindowsTheme":true},"profiles":[],"activeProfileId":null}"#,
+        )
+        .unwrap();
+        cfg.profiles = profiles;
+        cfg
+    }
+
+    fn prof(id: &str, kind: ProfileKind, sid: Option<&str>) -> Profile {
+        let mut p = config::new_profile(kind, id);
+        p.id = id.into();
+        p.windows_user = sid.map(|s| WindowsUser { sid: s.into(), username: "u".into() });
+        p
+    }
+
+    #[test]
+    fn gaming_can_share_account_with_one_work_profile() {
+        let cfg = cfg_with(vec![
+            prof("osnova", ProfileKind::Work, Some("S-1")),
+            prof("games", ProfileKind::Gaming, None),
+            prof("job", ProfileKind::Work, None),
+            prof("games2", ProfileKind::Gaming, None),
+        ]);
+        assert!(ensure_can_link(&cfg, "games", "S-1").is_ok());
+        assert!(ensure_can_link(&cfg, "job", "S-1").is_err(), "два рабочих в одной учётке нельзя");
+        let mut cfg2 = cfg.clone();
+        cfg2.profiles[1].windows_user = Some(WindowsUser { sid: "S-1".into(), username: "u".into() });
+        assert!(ensure_can_link(&cfg2, "games2", "S-1").is_err(), "два игровых в одной учётке нельзя");
+    }
 }

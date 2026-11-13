@@ -77,6 +77,27 @@ export function accountInfo(state: HubState, p: Profile): { status: AccountStatu
   return { status: "linked", user };
 }
 
+/** Профиль живёт в учётке текущего сеанса (например, игры — побочный режим основной учётки). */
+export function sameAccount(p: Profile, state: HubState): boolean {
+  return !!p.windowsUser && sameSid(p.windowsUser.sid, state.currentUser.sid);
+}
+
+/** Другой профиль, делящий с `p` одну учётку Windows. */
+export function accountSibling(profiles: Profile[], p: Profile): Profile | null {
+  if (!p.windowsUser) return null;
+  return profileBySid(profiles, p.windowsUser.sid, p.id);
+}
+
+/**
+ * Можно ли привязать профиль `me` к учётке `sid`. В одной учётке живут максимум один
+ * рабочий и один игровой профиль. Возвращает профиль-владельца, мешающий привязке, или null.
+ */
+export function accountBlocker(profiles: Profile[], sid: string, me: Profile): Profile | null {
+  return (
+    profiles.find((p) => p.id !== me.id && !!p.windowsUser && sameSid(p.windowsUser.sid, sid) && p.kind === me.kind) ?? null
+  );
+}
+
 /** Профиль, к которому привязана учётка с этим SID (кроме exceptId). */
 export function profileBySid(profiles: Profile[], sid: string, exceptId?: string): Profile | null {
   return profiles.find((p) => p.id !== exceptId && !!p.windowsUser && sameSid(p.windowsUser.sid, sid)) ?? null;

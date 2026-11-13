@@ -12,7 +12,7 @@ import { SettingsPage } from "./SettingsPage";
 import { Sidebar } from "./Sidebar";
 import { SwitchOverlay } from "./SwitchOverlay";
 import { TitleBar } from "./TitleBar";
-import { accentVars, profilesEqual } from "./profileUtils";
+import { accentVars, profilesEqual, sameAccount } from "./profileUtils";
 import "./hub.css";
 
 export type HubView = "profile" | "settings" | "library";
@@ -214,6 +214,15 @@ function HubInner() {
         toast.show({ kind: "error", title: "Сначала создайте учётку", text: `У профиля «${target.name}» нет своей учётки Windows` });
         return;
       }
+      // профиль в этой же учётке (игры как побочный режим основной) — без экрана входа
+      if (state && sameAccount(target, state)) {
+        try {
+          setState(await api.switchProfile(id));
+        } catch (e) {
+          toast.error(e, "Не удалось открыть профиль");
+        }
+        return;
+      }
       switchBusy.current = true;
       setSwitching({ to: target, from: profiles.find((p) => p.id === currentId) ?? null });
       const started = performance.now();
@@ -231,7 +240,7 @@ function HubInner() {
         }, left);
       }
     },
-    [profiles, currentId, setState, toast],
+    [profiles, currentId, state, setState, toast],
   );
 
   // Глобальные клавиши хаба: Esc — скрыть, 1–9 — переключение, Ctrl+S — сохранить.

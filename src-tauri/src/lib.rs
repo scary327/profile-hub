@@ -90,6 +90,7 @@ pub fn run() {
                 std::thread::spawn(move || core::on_session_start(&h, at_sign_in));
             }
             gamepad::spawn(handle.clone());
+            core::spawn_session_watcher(handle.clone());
             // прогреть кэш игр в фоне
             std::thread::spawn(move || {
                 core::games(&handle, false);

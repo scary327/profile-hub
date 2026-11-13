@@ -4,7 +4,7 @@ import { Dialog } from "../../components/Dialog";
 import { Icon } from "../../components/Icon";
 import { useToast } from "../../components/Toasts";
 import type { TabProps } from "../ProfileEditor";
-import { USERNAME_MAX, accountInfo, profileBySid, suggestUsername, validateUsername } from "../profileUtils";
+import { USERNAME_MAX, accountBlocker, accountInfo, accountSibling, suggestUsername, validateUsername } from "../profileUtils";
 
 type Mode = "create" | "existing" | null;
 
@@ -64,10 +64,35 @@ export function AccountTab({ draft, saved, state, onState }: TabProps) {
               <Icon name="unlink" size={14} /> Отвязать
             </button>
           </div>
-          <div className="field__hint" style={{ marginTop: 14 }}>
-            Профиль живёт в своей учётке Windows: браузеры, файлы, панель задач и автозагрузка здесь не пересекаются с
-            другими профилями. Переключение идёт через экран входа Windows.
-          </div>
+          {(() => {
+            const sib = accountSibling(state.config.profiles, saved);
+            if (!sib) {
+              return (
+                <div className="field__hint" style={{ marginTop: 14 }}>
+                  Профиль живёт в своей учётке Windows: браузеры, файлы, панель задач и автозагрузка здесь не пересекаются
+                  с другими профилями. Переключение идёт через экран входа Windows.
+                </div>
+              );
+            }
+            return saved.kind === "gaming" ? (
+              <div className="callout" style={{ marginTop: 14 }}>
+                <Icon name="user" size={16} />
+                <div>
+                  Игровой режим учётки профиля «{sib.icon} {sib.name}». Там он открывается сразу, без экрана входа
+                  (хоткей игрового режима или кнопка «Открыть игры»), а выход из него возвращает в «{sib.name}». Из других
+                  учёток — через экран входа, после чего игры откроются сами. Обои и тема — от «{sib.name}».
+                </div>
+              </div>
+            ) : (
+              <div className="callout" style={{ marginTop: 14 }}>
+                <Icon name="user" size={16} />
+                <div>
+                  В этой учётке также живёт игровой профиль «{sib.icon} {sib.name}» — он открывается здесь как игровой
+                  режим, без экрана входа.
+                </div>
+              </div>
+            );
+          })()}
           {missing && (
             <div className="field__hint field__hint--warn">
               Пользователя с таким SID больше нет в системе. Отвяжите его и создайте или выберите учётку заново.
@@ -114,23 +139,66 @@ export function AccountTab({ draft, saved, state, onState }: TabProps) {
 
   // ---------- у профиля нет учётки ----------
   const cu = state.currentUser;
-  const currentOwner = state.currentProfileId ? state.config.profiles.find((p) => p.id === state.currentProfileId) : null;
-  const currentTaken = !!currentOwner && currentOwner.id !== saved?.id;
-  const candidates = state.windowsUsers.filter((u) => u.enabled && !profileBySid(state.config.profiles, u.sid, saved?.id));
+  const me = saved ?? draft;
+  const profiles = state.config.profiles;
+  const currentOwner = accountBlocker(profiles, cu.sid, me);
+  const currentTaken = !!currentOwner;
+  const candidates = state.windowsUsers.filter((u) => u.enabled && !accountBlocker(profiles, u.sid, me));
+  // игровой профиль может жить в учётке рабочего как побочный режим
+  const hosts =
+    me.kind === "gaming"
+      ? profiles.filter((p) => p.kind === "work" && p.windowsUser && !accountBlocker(profiles, p.windowsUser.sid, me))
+      : [];
 
   return (
     <div className="stack">
       <div className="callout">
         <Icon name="user" size={16} />
         <div>
-          Для полной изоляции профилю нужна своя учётка Windows: свои браузеры, файлы и панель задач, ничего общего с
-          другими профилями. Создайте новую или привяжите существующую.
+          {me.kind === "gaming"
+            ? "Игровой профиль может жить в учётке основного рабочего профиля (игры открываются там без экрана входа) или в своей отдельной учётке."
+            : "Для полной изоляции профилю нужна своя учётка Windows: свои браузеры, файлы и панель задач, ничего общего с другими профилями. Создайте новую или привяжите существующую."}
         </div>
       </div>
 
       {!saved && (
         <div className="field__hint field__hint--warn" style={{ marginTop: 0 }}>
           Сначала создайте профиль кнопкой «Создать» выше — потом здесь можно будет завести для него учётку.
+        </div>
+      )}
+
+      {hosts.length > 0 && (
+        <div className="card">
+          <div className="card__title">Игры в учётке основного профиля</div>
+          <div className="field__hint" style={{ marginTop: 0, marginBottom: 12 }}>
+            Без отдельной учётки: игровой режим откроется прямо в учётке выбранного профиля, без экрана входа. Steam и Epic
+            — те же, что там.
+          </div>
+          <div className="acc-actions">
+            {hosts.map((h) => (
+              <button
+                key={h.id}
+                className="acc-action"
+                disabled={!saved || busy}
+                onClick={() =>
+                  saved &&
+                  h.windowsUser &&
+                  void run(
+                    () => api.linkWindowsUser(saved.id, h.windowsUser!.sid),
+                    `Игры теперь в учётке «${h.name}»`,
+                    "Не удалось привязать учётку",
+                  )
+                }
+              >
+                <span className="acc-action__icon">{h.icon}</span>
+                <span className="acc-action__title">В учётке «{h.name}»</span>
+                <span className="acc-action__text">
+                  <span className="mono">{h.windowsUser?.username}</span>
+                  {h.windowsUser?.sid === cu.sid ? " — вы сейчас здесь" : ""}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -375,7 +443,7 @@ function ExistingPicker({
           <Icon name="link" size={14} /> Привязать
         </button>
       </div>
-      <div className="field__hint">Показаны включённые учётки, которые не привязаны к другим профилям.</div>
+      <div className="field__hint">Показаны включённые учётки, в которых ещё нет профиля такого же типа.</div>
     </div>
   );
 }

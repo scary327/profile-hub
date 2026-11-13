@@ -121,6 +121,19 @@ pub fn list_users(current_sid: &str) -> Result<Vec<WinUserInfo>> {
         .collect())
 }
 
+/// Сеанс этого процесса сейчас на экране (не в фоне за экраном входа).
+pub fn is_session_active() -> bool {
+    use windows_sys::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    unsafe {
+        let mut mine = 0u32;
+        if ProcessIdToSessionId(GetCurrentProcessId(), &mut mine) == 0 {
+            return true;
+        }
+        WTSGetActiveConsoleSessionId() == mine
+    }
+}
+
 /// Уйти на экран входа, оставив текущий сеанс работать в фоне.
 pub fn disconnect_to_sign_in() -> Result<()> {
     let ok = unsafe { WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, 0) };

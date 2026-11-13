@@ -157,6 +157,7 @@ const config: AppConfig = {
   manualGames: [],
   lastPlayed: {},
   prevWorkProfileId: "work-a",
+  pendingGameModeSid: null,
 };
 
 const projects: Record<string, ProjectEntry[]> = {

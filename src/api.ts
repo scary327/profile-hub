@@ -82,6 +82,8 @@ export interface AppConfig {
   manualGames: ManualGame[];
   lastPlayed: Record<string, number>;
   prevWorkProfileId: string | null;
+  /** Внутреннее: учётка, где после входа откроется игровой режим. */
+  pendingGameModeSid: string | null;
 }
 
 export interface BrowserInfo {

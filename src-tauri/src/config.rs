@@ -95,6 +95,7 @@ fn default_config() -> AppConfig {
         manual_games: Vec::new(),
         last_played: Default::default(),
         prev_work_profile_id: None,
+        pending_game_mode_sid: None,
     }
 }
 
