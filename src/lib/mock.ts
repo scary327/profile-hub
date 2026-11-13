@@ -9,7 +9,7 @@
  */
 import { mockConvertFileSrc, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import type { AppConfig, Bookmark, BrowserInfo, Game, MonitorInfo, RunningGame, HubState, LauncherInfo, ManualGame, Profile, ProjectEntry, Settings, WindowsUser, WinUserInfo } from "../api";
+import type { AppConfig, Bookmark, BrowserInfo, DeviceBattery, DockApp, DockState, Game, MonitorInfo, RunningGame, HubState, LauncherInfo, ManualGame, Profile, ProjectEntry, Settings, WindowsUser, WinUserInfo } from "../api";
 
 const now = Math.floor(Date.now() / 1000);
 const DAY = 86_400;
@@ -129,6 +129,8 @@ const settings: Settings = {
   launchOnStartup: true,
   applyWindowsTheme: true,
   gameMonitor: null,
+  panelSource: null,
+  autoGameModeOnPad: true,
 };
 
 const config: AppConfig = {
@@ -185,6 +187,49 @@ let running: RunningGame[] = [
 let browserUrl: string | null = null;
 const logBrowser = (cmd: string, a: Record<string, unknown>) => console.info(`[mock] ${cmd}`, JSON.stringify(a));
 
+// ---------- окна приложений в панели (dock) ----------
+const dockApps: DockApp[] = [
+  { id: "chrome", name: "Google Chrome", kind: "browser", installed: true },
+  { id: "edge", name: "Microsoft Edge", kind: "browser", installed: true },
+  { id: "firefox", name: "Firefox", kind: "browser", installed: false },
+  { id: "opera", name: "Opera", kind: "browser", installed: true },
+  { id: "discord", name: "Discord", kind: "voice", installed: true },
+  { id: "telegram", name: "Telegram", kind: "voice", installed: true },
+  { id: "steamChat", name: "Чаты Steam", kind: "voice", installed: true },
+];
+/** Пристыкованное окно; launched — приложения, которые «уже запущены» (повторный dockOpen без задержки). */
+let docked: DockState | null = null;
+const launched = new Set<string>();
+const DOCK_LAUNCH_MS = 1500;
+const dockTitle = (appId: string, url: string | null) => {
+  const app = dockApps.find((x) => x.id === appId);
+  if (app?.kind === "browser") {
+    const host = url ? new URL(url).hostname.replace(/^www\./, "") : "Новая вкладка";
+    return `${host} — ${app.name}`;
+  }
+  return { discord: "#general | Друзья — Discord", telegram: "Telegram", steamChat: "Друзья" }[appId] ?? app?.name ?? appId;
+};
+/** ?dockfail=discord — dockOpen этого приложения падает (проверка «Повторить»). */
+const dockFail = params.get("dockfail");
+const emitDock = () => void emit("dock-changed", docked ? { ...docked } : null);
+// для QA из консоли: окно приложения закрылось само
+(window as unknown as { __mockDockClose?: () => void }).__mockDockClose = () => {
+  if (docked) launched.delete(docked.appId);
+  docked = null;
+  emitDock();
+};
+
+const batteries: DeviceBattery[] = [
+  { name: "WH-1000XM4", percent: 64, kind: "headset" },
+  { name: "MX Master 3S", percent: 18, kind: "mouse" },
+  ...(params.get("devices") === "4"
+    ? [
+        { name: "Keychron K3", percent: 81, kind: "keyboard" as const },
+        { name: "Galaxy Buds", percent: 9, kind: "other" as const },
+      ]
+    : []),
+];
+
 const projects: Record<string, ProjectEntry[]> = {
   "work-a": [
     { name: "payments-api", path: "C:\\Users\\dev\\Projects\\payments-api", modified: now - 3600 },
@@ -221,6 +266,8 @@ const padInfo =
     : padParam === "xbox"
       ? { connected: true, type: "xbox", id: "Xbox Wireless Controller (mock)" }
       : { connected: false, type: "xbox", id: "" };
+/** Заряд геймпада: 72 % (&battery=12 — свой уровень, &charging=1 — заряжается). */
+const padBattery = { battery: padInfo.connected ? Number(params.get("battery") ?? 72) : null, charging: params.get("charging") === "1" };
 
 export function installMocks() {
   // mockIPC выставляет __TAURI_INTERNALS__; по этому флагу UI понимает, что настоящего WebView нет
@@ -233,7 +280,7 @@ export function installMocks() {
       const a = (payload ?? {}) as Record<string, unknown>;
       switch (cmd) {
         case "get_gamepad_info":
-          return delay(padInfo);
+          return delay({ ...padInfo, ...padBattery });
         case "get_state":
           return delay(state());
         case "new_profile_template": {
@@ -387,6 +434,47 @@ export function installMocks() {
         case "browser_nav":
           logBrowser(cmd, a);
           return delay(undefined, 10);
+        case "list_dock_apps":
+          return delay(structuredClone(dockApps));
+        case "dock_open": {
+          logBrowser(cmd, a);
+          const appId = a.appId as string;
+          const url = (a.url as string | null) ?? null;
+          const app = dockApps.find((x) => x.id === appId);
+          if (!app?.installed) return Promise.reject(`Приложение ${appId} не установлено`);
+          const cold = !launched.has(appId);
+          if (docked && docked.appId !== appId) {
+            // прежнее окно отстыковывается (событие — как у настоящего бэкенда)
+            docked = null;
+            emitDock();
+          }
+          return delay(null, cold ? DOCK_LAUNCH_MS : url ? 250 : 30).then(() => {
+            if (dockFail === appId) return Promise.reject(`Окно ${app.name} не появилось за 10 секунд`);
+            launched.add(appId);
+            docked = { appId, title: url || !docked ? dockTitle(appId, url) : docked.title, visible: true };
+            emitDock();
+            return { ...docked };
+          });
+        }
+        case "dock_set_bounds":
+          logBrowser(cmd, a);
+          return delay(undefined, 10);
+        case "dock_hide":
+          logBrowser(cmd, a);
+          if (docked) docked = { ...docked, visible: false };
+          return delay(undefined, 10);
+        case "dock_release":
+          logBrowser(cmd, a);
+          docked = null;
+          setTimeout(emitDock, 50);
+          return delay(undefined, 30);
+        case "dock_state":
+          return delay(docked ? { ...docked } : null);
+        case "set_panel_source":
+          config.settings.panelSource = a.source as string;
+          return delay(state());
+        case "device_batteries":
+          return delay(structuredClone(batteries));
         case "save_voice_bookmarks":
           config.voiceBookmarks = a.bookmarks as Bookmark[];
           return delay(state());

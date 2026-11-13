@@ -3,7 +3,7 @@ import type { PadAction, PadType } from "../lib/useGamepad";
 
 export type InputDevice = "keyboard" | PadType;
 
-type GlyphAction = Exclude<PadAction, "up" | "down" | "left" | "right"> | "nav";
+type GlyphAction = Exclude<PadAction, "up" | "down" | "left" | "right" | "home"> | "nav";
 
 /*
  * Все значки — блоки фиксированного размера (--glyph, по умолчанию 32 единицы макета)

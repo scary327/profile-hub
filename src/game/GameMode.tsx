@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { api, type Bookmark, type Game, type GameSource, type LauncherInfo, type MonitorInfo, type RunningGame, type VoiceApps } from "../api";
+import { api, type Bookmark, type DeviceBattery, type DockApp, type Game, type GameSource, type LauncherInfo, type MonitorInfo, type RunningGame } from "../api";
 import { FallbackImage } from "../components/FallbackImage";
 import { ToastProvider, useToast } from "../components/Toasts";
 import { averageImageColor, hexToRgbTriplet } from "../lib/color";
@@ -11,7 +11,8 @@ import { useGamepad, type PadAction } from "../lib/useGamepad";
 import { useHubState } from "../lib/useHubState";
 import { useClock, useViewportUnit } from "../lib/useViewport";
 import { Backdrop } from "./Backdrop";
-import { BrowserPanel, hostOf, SiteIcon, useBrowserPanel } from "./BrowserPanel";
+import { Batteries, PadBattery } from "./Batteries";
+import { appBrand, BrowserPanel, hostOf, shortAppName, SiteIcon, useBrowserPanel, WEB } from "./BrowserPanel";
 import { GameTile } from "./GameTile";
 import { Glyph, type InputDevice } from "./Glyph";
 import { LaunchOverlay, type LaunchInfo } from "./LaunchOverlay";
@@ -28,7 +29,8 @@ interface Tab {
 }
 
 type DockItem =
-  | { key: string; group: "voice"; kind: "discord" | "steamChat" | "browser" }
+  | { key: string; group: "voice"; kind: "dockApp"; app: DockApp }
+  | { key: string; group: "voice"; kind: "browser" }
   | { key: string; group: "voice"; kind: "bookmark"; bm: Bookmark }
   | { key: string; group: "apps"; kind: "launcher"; l: LauncherInfo };
 
@@ -39,6 +41,7 @@ const FOCUS_SCALE = 1.36;
 const ROW_LEFT = 120;
 const RECENT_LIMIT = 24;
 const RUNNING_POLL_MS = 2500;
+const BATTERY_POLL_MS = 60_000;
 
 /** «1 ч 12 мин», «7 мин», «меньше минуты». */
 function sessionLength(startedAt: number, nowMs: number): string {
@@ -81,7 +84,8 @@ function GameModeInner() {
   const [coverTick, setCoverTick] = useState(0);
   const [cursorVisible, setCursorVisible] = useState(false);
   const [running, setRunning] = useState<RunningGame[]>([]);
-  const [voice, setVoice] = useState<VoiceApps>({ discord: false, steam: false });
+  const [dockApps, setDockApps] = useState<DockApp[]>([]);
+  const [batteries, setBatteries] = useState<DeviceBattery[]>([]);
   const [sessionNow, setSessionNow] = useState(() => Date.now());
   /** Запрос «поставить фокус на игру» (запущенная игра, клик по чипу). */
   const [focusReq, setFocusReq] = useState<{ id: string; seq: number } | null>(null);
@@ -98,7 +102,11 @@ function GameModeInner() {
   const panelPad = useRef<((a: PadAction) => void) | null>(null);
   const dockRowRef = useRef<HTMLDivElement>(null);
 
-  const browser = useBrowserPanel(menuOpen || !!launching);
+  // источник панели по умолчанию: из настроек, если такое приложение установлено (пока список не пришёл — как есть)
+  const savedSource = hub?.config.settings.panelSource ?? WEB;
+  const defaultSource =
+    savedSource === WEB || !dockApps.length || dockApps.some((a) => a.id === savedSource && a.installed) ? savedSource : WEB;
+  const browser = useBrowserPanel(menuOpen || !!launching, defaultSource);
   const panelActive = browser.phase === "opening" || browser.phase === "open";
 
   // ---------- данные ----------
@@ -145,18 +153,38 @@ function GameModeInner() {
       .catch(() => setMonitors([]));
   }, []);
 
+  const loadDockApps = useCallback(() => {
+    api
+      .listDockApps()
+      .then(setDockApps)
+      .catch(() => setDockApps([]));
+  }, []);
+
+  const loadBatteries = useCallback(() => {
+    api
+      .deviceBatteries()
+      .then((b) => setBatteries((prev) => (JSON.stringify(prev) === JSON.stringify(b) ? prev : b)))
+      .catch(() => setBatteries([]));
+  }, []);
+
   useEffect(() => {
     void loadGames(false);
     api
       .listLaunchers()
       .then(setLaunchers)
       .catch(() => setLaunchers([]));
-    api
-      .voiceApps()
-      .then(setVoice)
-      .catch(() => {});
+    loadDockApps();
     loadMonitors();
-  }, [loadGames, loadMonitors]);
+  }, [loadGames, loadMonitors, loadDockApps]);
+
+  // заряд беспроводных устройств: раз в минуту, пока окно видно
+  useEffect(() => {
+    loadBatteries();
+    const t = window.setInterval(() => {
+      if (!document.hidden) loadBatteries();
+    }, BATTERY_POLL_MS);
+    return () => window.clearInterval(t);
+  }, [loadBatteries]);
 
   // запущенные игры: опрос, пока окно видно
   useEffect(() => {
@@ -174,6 +202,8 @@ function GameModeInner() {
   }, []);
 
   // Окно игрового режима не уничтожается, а прячется: при возврате обновляем список (lastPlayed мог измениться).
+  // Когда окно прячут, бэкенд сам отстыковывает окно приложения — панель начинаем заново, закрытой.
+  const resetPanel = browser.reset;
   useEffect(() => {
     const onFocus = () => {
       if (Date.now() - lastLoad.current > 15_000) void loadGames(false);
@@ -185,11 +215,9 @@ function GameModeInner() {
         wantRunningFocus.current = true;
         onFocus();
         setMenuOpen(false);
-        api
-          .voiceApps()
-          .then(setVoice)
-          .catch(() => {});
-      }
+        loadDockApps();
+        loadBatteries();
+      } else resetPanel();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVis);
@@ -197,7 +225,7 @@ function GameModeInner() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [loadGames, pollRunning]);
+  }, [loadGames, pollRunning, loadDockApps, loadBatteries, resetPanel]);
 
   // ---------- вкладки и список ----------
   const tabs = useMemo<Tab[]>(() => {
@@ -267,13 +295,12 @@ function GameModeInner() {
   const bookmarks = useMemo(() => hub?.config.voiceBookmarks ?? [], [hub]);
   const dockItems = useMemo<DockItem[]>(() => {
     const items: DockItem[] = [];
-    if (voice.discord) items.push({ key: "discord", group: "voice", kind: "discord" });
-    if (voice.steam) items.push({ key: "steamChat", group: "voice", kind: "steamChat" });
+    for (const app of dockApps) if (app.installed && app.kind === "voice") items.push({ key: `app:${app.id}`, group: "voice", kind: "dockApp", app });
     items.push({ key: "browser", group: "voice", kind: "browser" });
     for (const bm of bookmarks) items.push({ key: `bm:${bm.url}`, group: "voice", kind: "bookmark", bm });
     for (const l of launchers) items.push({ key: `l:${l.source}`, group: "apps", kind: "launcher", l });
     return items;
-  }, [voice, bookmarks, launchers]);
+  }, [dockApps, bookmarks, launchers]);
   const dIdx = Math.min(dockIdx, Math.max(0, dockItems.length - 1));
 
   // ---------- акцент из обложки ----------
@@ -344,24 +371,35 @@ function GameModeInner() {
   const activateDock = useCallback(
     (it: DockItem) => {
       switch (it.kind) {
-        case "discord":
-          void api.openDiscord().catch((e) => toast.error(e, "Не удалось открыть Discord"));
-          break;
-        case "steamChat":
-          void api.openSteamChat().catch((e) => toast.error(e, "Не удалось открыть чаты Steam"));
+        case "dockApp":
+          browser.openIn(it.app.id, null);
           break;
         case "browser":
-          browser.show(null);
+          browser.openIn(defaultSource, null);
           break;
         case "bookmark":
-          browser.show(it.bm.url);
+          browser.openIn(defaultSource, it.bm.url);
           break;
         case "launcher":
           void launchLauncher(it.l);
           break;
       }
     },
-    [browser, launchLauncher, toast],
+    [browser, defaultSource, launchLauncher],
+  );
+
+  const pickSource = useCallback(
+    (id: string) => {
+      browser.openIn(id, null);
+      // браузеры (и встроенный) запоминаем как источник по умолчанию; голосовые приложения — нет
+      const kind = id === WEB ? "browser" : dockApps.find((a) => a.id === id)?.kind;
+      if (kind === "browser" && id !== (hub?.config.settings.panelSource ?? WEB))
+        api
+          .setPanelSource(id)
+          .then(setHub)
+          .catch((e) => toast.error(e, "Не удалось запомнить браузер панели"));
+    },
+    [browser, dockApps, hub, setHub, toast],
   );
 
   const saveBookmarks = useCallback(
@@ -481,6 +519,11 @@ function GameModeInner() {
 
   const handle = useCallback(
     (a: PadAction) => {
+      // PS / Guide: фокус переключает бэкенд, нам — закрыть временные оверлеи
+      if (a === "home") {
+        setMenuOpen(false);
+        return;
+      }
       if (launching) return;
       if (menuOpen) {
         const n = menuItems.length;
@@ -694,7 +737,7 @@ function GameModeInner() {
     ? [
         { glyphs: <Glyph action="nav" device={device} />, label: "Выбор" },
         { glyphs: <Glyph action="confirm" device={device} />, label: "Открыть" },
-        ...(browser.alive
+        ...(browser.source === WEB && browser.alive
           ? [
               {
                 glyphs: (
@@ -733,7 +776,7 @@ function GameModeInner() {
           ),
           label: "Разделы",
         },
-        { glyphs: <Glyph action="voice" device={device} />, label: browser.alive ? "Звонок" : "Браузер" },
+        { glyphs: <Glyph action="voice" device={device} />, label: browser.alive || browser.dockApp ? "Звонок" : "Браузер" },
         { glyphs: <Glyph action="menu" device={device} />, label: "Меню" },
       ];
 
@@ -768,12 +811,22 @@ function GameModeInner() {
           <span className="gm-app__name">{it.l.name}</span>
         </button>
       );
-    const spec = {
-      discord: { name: "Discord", brand: "#5865f2", icon: VOICE_ICONS.discord, sub: "Голосовые каналы" },
-      steamChat: { name: "Чаты Steam", brand: "#1a9fff", icon: VOICE_ICONS.chat, sub: "Друзья и звонки" },
-      browser: { name: "Браузер", brand: "#8b5cf6", icon: VOICE_ICONS.globe, sub: browser.alive ? "активно" : "Meet, Telegram…" },
-    }[it.kind];
-    const activeBrowser = it.kind === "browser" && browser.alive;
+    const browserLive = browser.alive || (!!browser.dockApp && dockApps.find((a) => a.id === browser.dockApp)?.kind === "browser");
+    const spec =
+      it.kind === "dockApp"
+        ? {
+            name: it.app.name,
+            brand: appBrand(it.app.id),
+            icon: VOICE_ICONS[it.app.id === "discord" ? "discord" : it.app.id === "telegram" ? "telegram" : "chat"],
+            sub: browser.dockApp === it.app.id && browser.dockStatus === "ready" ? "в панели" : (VOICE_SUB[it.app.id] ?? "Звонки и чаты"),
+          }
+        : {
+            name: "Браузер",
+            brand: "#8b5cf6",
+            icon: VOICE_ICONS.globe,
+            sub: browserLive ? "активно" : defaultSource === WEB ? "Meet, Telegram…" : `В ${shortAppName(dockApps.find((a) => a.id === defaultSource)?.name ?? "браузере")}`,
+          };
+    const activeBrowser = it.kind === "dockApp" ? browser.dockApp === it.app.id && browser.dockStatus === "ready" : browserLive;
     return (
       <button
         key={it.key}
@@ -794,6 +847,19 @@ function GameModeInner() {
   };
 
   const voiceCount = dockItems.filter((d) => d.group === "voice").length;
+
+  // плашка «звонок в фоне»: пристыкованное приложение (готовое) главнее страницы встроенного браузера
+  const dockedApp = browser.dockApp && browser.dockStatus === "ready" ? dockApps.find((a) => a.id === browser.dockApp) : undefined;
+  const pill: { source: string; title: string; sub: string | null } | null =
+    browser.dockApp && browser.dockStatus === "ready"
+      ? {
+          source: browser.dockApp,
+          title: `${dockedApp ? shortAppName(dockedApp.name) : browser.dockApp} в панели`,
+          sub: browser.dock?.title ?? null,
+        }
+      : browser.alive
+        ? { source: WEB, title: "Звонок в браузере", sub: browser.url ? hostOf(browser.url) : null }
+        : null;
 
   return (
     <div
@@ -843,7 +909,9 @@ function GameModeInner() {
               <path d="M6 11h4M8 9v4M15 12h.01M18 10h.01M17.32 5H6.68a4 4 0 0 0-3.978 3.59l-.6 6A3 3 0 0 0 5.08 18c1.38 0 2.04-.88 2.92-2l.6-.75a2 2 0 0 1 1.56-.75h3.68a2 2 0 0 1 1.56.75L16 16c.88 1.12 1.54 2 2.92 2a3 3 0 0 0 2.98-3.41l-.6-6A4 4 0 0 0 17.32 5z" />
             </svg>
             {pad.connected && <span className="gm-pad__label">{pad.type === "playstation" ? "DualSense" : "Xbox"}</span>}
+            {pad.connected && <PadBattery percent={pad.battery ?? null} charging={!!pad.charging} />}
           </span>
+          <Batteries items={batteries} />
           {activeProfile && (
             <span className="gm-profile">
               <span className="gm-profile__icon">{activeProfile.icon}</span>
@@ -970,8 +1038,8 @@ function GameModeInner() {
       </footer>
 
       {/* ---------- звонок в фоне ---------- */}
-      {browser.alive && !browser.shown && (
-        <button className="gm-callpill" onClick={() => browser.show(null)}>
+      {!browser.shown && pill && (
+        <button className="gm-callpill" onClick={() => browser.openIn(pill.source, null)}>
           <span className="gm-callpill__mic">
             <svg viewBox="0 0 20 20" aria-hidden="true">
               <path
@@ -984,8 +1052,8 @@ function GameModeInner() {
             </svg>
           </span>
           <span className="gm-callpill__text">
-            <span className="gm-callpill__title">Звонок в браузере</span>
-            {browser.url && <span className="gm-callpill__host">{hostOf(browser.url)}</span>}
+            <span className="gm-callpill__title">{pill.title}</span>
+            {pill.sub && <span className="gm-callpill__host">{pill.sub}</span>}
           </span>
           <Glyph action="voice" device={device} />
         </button>
@@ -993,7 +1061,16 @@ function GameModeInner() {
 
       {/* ---------- встроенный браузер ---------- */}
       {browser.shown && (
-        <BrowserPanel ctl={browser} bookmarks={bookmarks} onSaveBookmarks={saveBookmarks} device={device} showFocus={showFocus} padRef={panelPad} />
+        <BrowserPanel
+          ctl={browser}
+          apps={dockApps}
+          bookmarks={bookmarks}
+          onSaveBookmarks={saveBookmarks}
+          onPickSource={pickSource}
+          device={device}
+          showFocus={showFocus}
+          padRef={panelPad}
+        />
       )}
 
       {menuOpen && (
@@ -1015,6 +1092,12 @@ function GameModeInner() {
     </div>
   );
 }
+
+const VOICE_SUB: Record<string, string> = {
+  discord: "Голосовые каналы",
+  telegram: "Звонки и чаты",
+  steamChat: "Друзья и звонки",
+};
 
 const VI = ({ children }: { children: ReactNode }) => (
   <svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true">
@@ -1046,6 +1129,11 @@ const VOICE_ICONS = {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </VI>
+  ),
+  telegram: (
+    <VI>
+      <path d="M21 4.5L3.5 11.2l5.6 2 2 6.3 3.2-3.9 4.9 3.6zM9.1 13.2l8.6-6.1" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </VI>
   ),
   globe: (

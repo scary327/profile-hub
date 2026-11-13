@@ -7,18 +7,26 @@
 //! * Остальные (Xbox и пр.) — через gilrs.
 //!
 //! Действия уходят окну "game" событием "pad-action", состояние — событием "pad-info".
+//! Кнопка PS/Guide обрабатывается всегда (даже когда активна игра): переключает
+//! фокус между меню и игрой. Подключение геймпада может само открыть игровой режим.
 
-use gilrs::{Axis, Button, Gilrs};
+use crate::core;
+use gilrs::{Axis, Button, Gilrs, PowerInfo};
 use hidapi::{HidApi, HidDevice};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 const INITIAL_DELAY: Duration = Duration::from_millis(350);
 const REPEAT_DELAY: Duration = Duration::from_millis(110);
 const STICK_THRESHOLD: f32 = 0.5;
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
+/// Геймпад должен пропасть хотя бы на столько, чтобы его появление считалось «включением»
+/// (короткие обрывы Bluetooth не должны открывать игровой режим).
+const RECONNECT_GAP: Duration = Duration::from_secs(4);
+/// Сразу после запуска Hub геймпад «подключается» — это не включение.
+const STARTUP_GRACE: Duration = Duration::from_secs(10);
 
 const SONY: u16 = 0x054c;
 const DUALSENSE: [u16; 2] = [0x0ce6, 0x0df2]; // DualSense, DualSense Edge
@@ -31,11 +39,14 @@ pub struct PadInfo {
     /// "playstation" | "xbox"
     pub r#type: String,
     pub id: String,
+    /// Заряд 0..100; None — неизвестно или проводной без батареи.
+    pub battery: Option<u8>,
+    pub charging: bool,
 }
 
 impl PadInfo {
     fn none() -> Self {
-        PadInfo { connected: false, r#type: "xbox".into(), id: String::new() }
+        PadInfo { connected: false, r#type: "xbox".into(), id: String::new(), battery: None, charging: false }
     }
 }
 
@@ -55,10 +66,15 @@ pub struct PadState {
     pub folder: bool,
     pub tab_prev: bool,
     pub tab_next: bool,
+    /// Options (Sony) / Start (Xbox).
     pub menu: bool,
     /// Create/Share (Sony) или View/Back (Xbox) — панель голоса и браузера.
     pub voice: bool,
+    /// PS (Sony) / Guide (Xbox) — переключение меню ↔ игра.
+    pub home: bool,
     pub dir: Dir,
+    /// (заряд 0..100, заряжается) — если отчёт его содержит.
+    pub battery: Option<(u8, bool)>,
 }
 
 impl PadState {
@@ -90,19 +106,45 @@ fn stick_dir(x: f32, y_down: f32) -> Dir {
 
 // ---------------- Sony HID ----------------
 
+/// Байт статуса DualSense: младшие 4 бита — уровень 0..10, старшие — 0 разряжается,
+/// 1 заряжается, 2 заряжен.
+fn dualsense_battery(status: u8) -> Option<(u8, bool)> {
+    let level = status & 0x0f;
+    match status >> 4 {
+        0 => Some(((level * 10 + 5).min(100), false)),
+        1 => Some(((level * 10 + 5).min(100), true)),
+        2 => Some((100, false)),
+        _ => None,
+    }
+}
+
+/// Байт статуса DS4: младшие 4 бита — уровень, 0x10 — подключён кабель.
+fn ds4_battery(status: u8) -> Option<(u8, bool)> {
+    let level = status & 0x0f;
+    let cable = status & 0x10 != 0;
+    if cable {
+        // по кабелю шкала 0..11: 11 — заряжен
+        if level >= 10 { Some((100, false)) } else { Some((level * 10 + 5, true)) }
+    } else {
+        Some(((level * 10 + 5).min(100), false))
+    }
+}
+
 /// Разобрать входной отчёт DualSense/DS4. Возвращает None для «чужих» отчётов.
 pub fn parse_sony_report(dualsense: bool, data: &[u8]) -> Option<PadState> {
-    // (смещение LX, смещение байта кнопок 0) для каждого формата;
+    // (смещение LX, смещение байта кнопок 0, смещение байта батареи) для каждого формата;
     // LY = LX+1, кнопки 1 и 2 идут сразу за кнопками 0.
-    let (lx, b0) = match (data.first()?, dualsense) {
+    let (lx, b0, bat): (usize, usize, Option<usize>) = match (data.first()?, dualsense) {
         // DualSense по USB: полный отчёт 64 байта
-        (0x01, true) if data.len() >= 64 => (1, 8),
-        // DualSense по Bluetooth в простом режиме и DS4 по USB
-        (0x01, _) if data.len() >= 8 => (1, 5),
+        (0x01, true) if data.len() >= 64 => (1, 8, Some(53)),
+        // DS4 по USB: тоже 64 байта, но своя раскладка
+        (0x01, false) if data.len() >= 64 => (1, 5, Some(30)),
+        // DualSense по Bluetooth в простом режиме (без батареи)
+        (0x01, _) if data.len() >= 8 => (1, 5, None),
         // DualSense по Bluetooth в расширенном режиме (после Steam/игр)
-        (0x31, true) if data.len() >= 12 => (2, 9),
+        (0x31, true) if data.len() >= 12 => (2, 9, (data.len() > 54).then_some(54)),
         // DS4 по Bluetooth в расширенном режиме
-        (0x11, false) if data.len() >= 11 => (3, 8),
+        (0x11, false) if data.len() >= 11 => (3, 7, (data.len() > 32).then_some(32)),
         _ => return None,
     };
     let axis = |i: usize| (data[i] as f32 - 128.0) / 127.0;
@@ -117,6 +159,7 @@ pub fn parse_sony_report(dualsense: bool, data: &[u8]) -> Option<PadState> {
         _ => None,
     }
     .or_else(|| stick_dir(x, y));
+    let battery = bat.and_then(|i| if dualsense { dualsense_battery(data[i]) } else { ds4_battery(data[i]) });
     Some(PadState {
         // k0: 0x10 □, 0x20 ✕, 0x40 ○, 0x80 △
         confirm: k0 & 0x20 != 0,
@@ -125,10 +168,12 @@ pub fn parse_sony_report(dualsense: bool, data: &[u8]) -> Option<PadState> {
         // k1: 0x01 L1, 0x02 R1, 0x10 Create/Share, 0x20 Options
         tab_prev: k1 & 0x01 != 0,
         tab_next: k1 & 0x02 != 0,
-        // k2: 0x01 PS
-        menu: k1 & 0x20 != 0 || k2 & 0x01 != 0,
+        menu: k1 & 0x20 != 0,
         voice: k1 & 0x10 != 0,
+        // k2: 0x01 PS
+        home: k2 & 0x01 != 0,
         dir,
+        battery,
     })
 }
 
@@ -137,6 +182,7 @@ struct SonyPad {
     dualsense: bool,
     name: String,
     last: PadState,
+    battery: Option<(u8, bool)>,
 }
 
 static LAST_SEEN: Mutex<String> = Mutex::new(String::new());
@@ -170,10 +216,18 @@ fn open_sony(api: &mut HidApi) -> Option<SonyPad> {
         let dualsense = DUALSENSE.contains(&pid);
         match info.open_device(api) {
             Ok(dev) => {
+                // По Bluetooth геймпад сначала шлёт «простые» отчёты без батареи и сенсоров.
+                // Чтение калибровочного feature-отчёта переключает его в расширенный режим
+                // (0x31 / 0x11) — так же делают драйвер Linux и Steam. По USB безвредно.
+                let mut feat = if dualsense { vec![0u8; 41] } else { vec![0u8; 37] };
+                feat[0] = if dualsense { 0x05 } else { 0x02 };
+                if let Err(e) = dev.get_feature_report(&mut feat) {
+                    log::warn!("расширенный режим не включился: {e}");
+                }
                 let _ = dev.set_blocking_mode(false);
                 let name = if dualsense { "DualSense" } else { "DualShock 4" }.to_string();
                 log::info!("геймпад по HID: {name} ({:04x}:{pid:04x})", SONY);
-                return Some(SonyPad { dev, dualsense, name, last: PadState::default() });
+                return Some(SonyPad { dev, dualsense, name, last: PadState::default(), battery: None });
             }
             Err(e) => log::warn!("не удалось открыть {pid:04x}: {e}"),
         }
@@ -189,6 +243,9 @@ fn read_sony(pad: &mut SonyPad) -> Result<PadState, ()> {
             Ok(0) => return Ok(pad.last),
             Ok(n) => {
                 if let Some(st) = parse_sony_report(pad.dualsense, &buf[..n]) {
+                    if st.battery.is_some() {
+                        pad.battery = st.battery;
+                    }
                     pad.last = st;
                 }
             }
@@ -215,31 +272,44 @@ fn gilrs_state(g: &gilrs::Gamepad) -> PadState {
         // в gilrs вверх по Y = +
         stick_dir(g.value(Axis::LeftStickX), -g.value(Axis::LeftStickY))
     };
+    let battery = match g.power_info() {
+        PowerInfo::Discharging(p) => Some((p.min(100), false)),
+        PowerInfo::Charging(p) => Some((p.min(100), true)),
+        PowerInfo::Charged => Some((100, false)),
+        PowerInfo::Wired | PowerInfo::Unknown => None,
+    };
     PadState {
         confirm: g.is_pressed(Button::South),
         back: g.is_pressed(Button::East),
         folder: g.is_pressed(Button::North),
         tab_prev: g.is_pressed(Button::LeftTrigger),
         tab_next: g.is_pressed(Button::RightTrigger),
-        menu: g.is_pressed(Button::Start) || g.is_pressed(Button::Mode),
+        menu: g.is_pressed(Button::Start),
         voice: g.is_pressed(Button::Select),
+        home: g.is_pressed(Button::Mode),
         dir,
+        battery,
     }
 }
 
 // ---------------- общий цикл ----------------
 
-/// Окно игр видно и в фокусе — иначе ввод не наш (например, запущена игра).
+/// Окно игр видно и активно оно само или пристыкованное к нему окно —
+/// иначе ввод не наш (например, запущена игра).
 fn game_focused(app: &AppHandle) -> bool {
-    app.get_webview_window("game")
-        .map(|w| w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false))
-        .unwrap_or(false)
+    core::game_hwnd(app)
+        .is_some_and(|h| crate::winfocus::is_foreground_tree(crate::winfocus::hwnd_from(h)))
 }
 
 fn set_info(app: &AppHandle, info: PadInfo) {
     let mut cur = INFO.lock();
     if cur.as_ref() != Some(&info) {
-        log::info!("геймпад: {info:?}");
+        // заряд меняется часто — в лог пишем только смену подключения
+        if cur.as_ref().is_none_or(|c| {
+            c.connected != info.connected || c.id != info.id || c.battery.is_some() != info.battery.is_some()
+        }) {
+            log::info!("геймпад: {info:?}");
+        }
         *cur = Some(info.clone());
         drop(cur);
         let _ = app.emit_to("game", "pad-info", info);
@@ -288,6 +358,23 @@ impl Repeater {
     }
 }
 
+/// Геймпад включили — открыть игровой режим, если это уместно.
+fn auto_game_mode(app: &AppHandle) {
+    let enabled = core::state(app).config.lock().settings.auto_game_mode_on_pad;
+    if !enabled || core::game_window_visible(app) || !core::gaming_here(app) {
+        return;
+    }
+    // уже играем во что-то из библиотеки — не выдёргиваем из игры
+    if !crate::gamemode::running_games(app).is_empty() {
+        log::info!("геймпад включён, но идёт игра — игровой режим не открываю");
+        return;
+    }
+    log::info!("геймпад включён — открываю игровой режим");
+    if let Err(e) = core::show_game_window(app) {
+        log::error!("не удалось открыть игровой режим: {e:#}");
+    }
+}
+
 pub fn spawn(app: AppHandle) {
     std::thread::Builder::new()
         .name("gamepad".into())
@@ -303,6 +390,10 @@ fn run(app: AppHandle) {
     let mut sony: Option<SonyPad> = None;
     let mut last_scan = Instant::now() - RESCAN_EVERY;
     let mut rep = Repeater::new();
+    let started = Instant::now();
+    let mut was_connected = false;
+    let mut disconnected_since = Some(Instant::now());
+    let mut home_prev = false;
 
     loop {
         // gilrs обновляет состояние только по мере чтения событий
@@ -323,7 +414,14 @@ fn run(app: AppHandle) {
             match read_sony(pad) {
                 Ok(st) => {
                     state = Some(st);
-                    info = PadInfo { connected: true, r#type: "playstation".into(), id: pad.name.clone() };
+                    let (battery, charging) = pad.battery.map_or((None, false), |(p, c)| (Some(p), c));
+                    info = PadInfo {
+                        connected: true,
+                        r#type: "playstation".into(),
+                        id: pad.name.clone(),
+                        battery,
+                        charging,
+                    };
                 }
                 Err(()) => sony = None,
             }
@@ -332,12 +430,43 @@ fn run(app: AppHandle) {
             if let Some(g) = gilrs.as_ref() {
                 // Sony через gilrs пропускаем: его читает HID-ветка
                 if let Some((_, pad)) = g.gamepads().find(|(_, p)| p.vendor_id() != Some(SONY)) {
-                    state = Some(gilrs_state(&pad));
-                    info = PadInfo { connected: true, r#type: "xbox".into(), id: pad.name().to_string() };
+                    let st = gilrs_state(&pad);
+                    let (battery, charging) = st.battery.map_or((None, false), |(p, c)| (Some(p), c));
+                    state = Some(st);
+                    info = PadInfo {
+                        connected: true,
+                        r#type: "xbox".into(),
+                        id: pad.name().to_string(),
+                        battery,
+                        charging,
+                    };
                 }
             }
         }
+
+        // включение геймпада → игровой режим
+        let connected = info.connected;
+        if connected && !was_connected {
+            let gap_ok = disconnected_since.is_some_and(|t| t.elapsed() >= RECONNECT_GAP);
+            if gap_ok && started.elapsed() >= STARTUP_GRACE {
+                let app = app.clone();
+                std::thread::spawn(move || auto_game_mode(&app));
+            }
+            disconnected_since = None;
+        } else if !connected && was_connected {
+            disconnected_since = Some(Instant::now());
+        }
+        was_connected = connected;
         set_info(&app, info);
+
+        // PS / Guide — всегда, даже если активна игра
+        let home = state.is_some_and(|s| s.home);
+        if home && !home_prev {
+            let _ = app.emit_to("game", "pad-action", "home");
+            let app = app.clone();
+            std::thread::spawn(move || core::on_home_button(&app));
+        }
+        home_prev = home;
 
         let focused = game_focused(&app);
         if let Some(st) = state {
@@ -348,8 +477,8 @@ fn run(app: AppHandle) {
             rep = Repeater::new();
         }
 
-        // окно игр скрыто — опрашиваем редко, чтобы не тратить CPU
-        std::thread::sleep(if focused { Duration::from_millis(8) } else { Duration::from_millis(100) });
+        // окно игр не активно — опрашиваем реже, но достаточно часто, чтобы ловить PS
+        std::thread::sleep(if focused { Duration::from_millis(8) } else { Duration::from_millis(40) });
     }
 }
 
@@ -372,7 +501,7 @@ mod tests {
 
     #[test]
     fn dualsense_bt_extended_cross_and_dpad_up() {
-        let r = report(0x31, 78, 2, 9, 0x20 | 0x00, 0, 0);
+        let r = report(0x31, 78, 2, 9, 0x20, 0, 0);
         let st = parse_sony_report(true, &r).unwrap();
         assert!(st.confirm && !st.back);
         assert_eq!(st.dir, Some("up"));
@@ -384,19 +513,52 @@ mod tests {
         let st = parse_sony_report(true, &r).unwrap();
         assert!(st.back && !st.confirm);
         assert_eq!(st.dir, None);
+        assert_eq!(st.battery, None);
     }
 
     #[test]
     fn dualsense_usb_l1_r1_options_ps() {
         let r = report(0x01, 64, 1, 8, 0x08, 0x01 | 0x02 | 0x20, 0x01);
         let st = parse_sony_report(true, &r).unwrap();
-        assert!(st.tab_prev && st.tab_next && st.menu && !st.voice);
+        assert!(st.tab_prev && st.tab_next && st.menu && st.home && !st.voice);
+    }
+
+    #[test]
+    fn ps_is_not_menu() {
+        let r = report(0x31, 78, 2, 9, 0x08, 0, 0x01);
+        let st = parse_sony_report(true, &r).unwrap();
+        assert!(st.home && !st.menu);
     }
 
     #[test]
     fn dualsense_create_is_voice() {
         let r = report(0x31, 78, 2, 9, 0x08, 0x10, 0);
         assert!(parse_sony_report(true, &r).unwrap().voice);
+    }
+
+    #[test]
+    fn dualsense_battery_levels() {
+        let mut r = report(0x31, 78, 2, 9, 0x08, 0, 0);
+        r[54] = 0x07; // 7/10, разряжается
+        assert_eq!(parse_sony_report(true, &r).unwrap().battery, Some((75, false)));
+        r[54] = 0x13; // заряжается
+        assert_eq!(parse_sony_report(true, &r).unwrap().battery, Some((35, true)));
+        r[54] = 0x2a; // заряжен
+        assert_eq!(parse_sony_report(true, &r).unwrap().battery, Some((100, false)));
+        let mut u = report(0x01, 64, 1, 8, 0x08, 0, 0);
+        u[53] = 0x0a;
+        assert_eq!(parse_sony_report(true, &u).unwrap().battery, Some((100, false)));
+    }
+
+    #[test]
+    fn ds4_battery_levels() {
+        let mut r = report(0x11, 78, 3, 7, 0x08, 0, 0);
+        r[32] = 0x05;
+        assert_eq!(parse_sony_report(false, &r).unwrap().battery, Some((55, false)));
+        r[32] = 0x14; // кабель, заряжается
+        assert_eq!(parse_sony_report(false, &r).unwrap().battery, Some((45, true)));
+        r[32] = 0x1b; // кабель, заряжен
+        assert_eq!(parse_sony_report(false, &r).unwrap().battery, Some((100, false)));
     }
 
     #[test]
@@ -411,8 +573,14 @@ mod tests {
 
     #[test]
     fn ds4_bt_triangle() {
-        let r = report(0x11, 78, 3, 8, 0x80 | 0x08, 0, 0);
+        let r = report(0x11, 78, 3, 7, 0x80 | 0x08, 0, 0);
         assert!(parse_sony_report(false, &r).unwrap().folder);
+    }
+
+    #[test]
+    fn ds4_usb_cross() {
+        let r = report(0x01, 64, 1, 5, 0x20 | 0x08, 0, 0);
+        assert!(parse_sony_report(false, &r).unwrap().confirm);
     }
 
     #[test]

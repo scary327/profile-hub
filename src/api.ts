@@ -75,6 +75,34 @@ export interface Settings {
   applyWindowsTheme: boolean;
   /** Монитор игрового режима (MonitorInfo.name); null — основной. */
   gameMonitor: string | null;
+  /** Источник панели по умолчанию: "web" (встроенный браузер) или DockApp.id. null = "web". */
+  panelSource: string | null;
+  /** Открывать игровой режим при включении геймпада (если игра сейчас не запущена). */
+  autoGameModeOnPad: boolean;
+}
+
+/** Беспроводное устройство с батареей (Bluetooth-наушники, мышь и т.п.). Геймпад — в GamepadInfo. */
+export interface DeviceBattery {
+  name: string;
+  /** 0..100 */
+  percent: number;
+  kind: "gamepad" | "headset" | "mouse" | "keyboard" | "other";
+}
+
+/** Приложение, чьё окно можно пристыковать в панель игрового режима. */
+export interface DockApp {
+  /** "chrome" | "edge" | "firefox" | "opera" | "operaGx" | "brave" | "yandex" | "discord" | "telegram" | "steamChat" */
+  id: string;
+  name: string;
+  kind: "browser" | "voice";
+  installed: boolean;
+}
+
+/** Пристыкованное сейчас окно (null — ничего). */
+export interface DockState {
+  appId: string;
+  title: string;
+  visible: boolean;
 }
 
 export interface Bookmark {
@@ -258,7 +286,34 @@ export const api = {
   browserClose: () => invoke<void>("browser_close"),
   browserNav: (action: "back" | "forward" | "reload") => invoke<void>("browser_nav", { action }),
   saveVoiceBookmarks: (bookmarks: Bookmark[]) => invoke<HubState>("save_voice_bookmarks", { bookmarks }),
+
+  // ---------- игровой режим: окна приложений в панели ----------
+  /** Что можно пристыковать (установленные браузеры, Discord, Telegram, чаты Steam). */
+  listDockApps: () => invoke<DockApp[]>("list_dock_apps"),
+  /**
+   * Пристыковать окно приложения в панель поверх `rect` (как browserOpen: rect — область-заглушка в CSS px).
+   * Если приложение не запущено — запускает. Для браузера с `url` открывает новое окно с этим адресом
+   * (это обычный браузер пользователя: его профиль, входы, вкладки). Если это же приложение уже
+   * пристыковано — просто показывает и ставит в `rect` (url=null) или открывает url в нём.
+   * Ждёт появления окна до ~10 с. Ранее пристыкованное другое приложение отстыковывается.
+   */
+  dockOpen: (appId: string, url: string | null, rect: Rect) => invoke<DockState>("dock_open", { appId, url, rect }),
+  dockSetBounds: (rect: Rect) => invoke<void>("dock_set_bounds", { rect }),
+  /** Спрятать пристыкованное окно (приложение работает, звонок продолжается). */
+  dockHide: () => invoke<void>("dock_hide"),
+  /** Отстыковать: вернуть окну обычный вид и место на рабочем столе. */
+  dockRelease: () => invoke<void>("dock_release"),
+  dockState: () => invoke<DockState | null>("dock_state"),
+  /** Заряд беспроводных устройств Windows (кэш, обновляется раз в минуту; можно опрашивать раз в 30–60 с). */
+  deviceBatteries: () => invoke<DeviceBattery[]>("device_batteries"),
+  /** Запомнить источник панели по умолчанию ("web" или DockApp.id). */
+  setPanelSource: (source: string) => invoke<HubState>("set_panel_source", { source }),
 };
+
+/** Пристыкованное окно изменилось (закрылось само, отстыковано и т.п.); null — ничего не пристыковано. */
+export function onDockChanged(cb: (s: DockState | null) => void): Promise<UnlistenFn> {
+  return listen<DockState | null>("dock-changed", (e) => cb(e.payload));
+}
 
 /** Встроенный браузер перешёл на новую страницу. */
 export function onBrowserUrl(cb: (url: string) => void): Promise<UnlistenFn> {

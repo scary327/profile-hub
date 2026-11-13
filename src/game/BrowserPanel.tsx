@@ -1,23 +1,29 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode } from "react";
-import { api, onBrowserUrl, type Bookmark, type Rect } from "../api";
+import { api, onBrowserUrl, onDockChanged, type Bookmark, type DockApp, type DockState, type Rect } from "../api";
 import { FallbackImage } from "../components/FallbackImage";
+import { errorMessage } from "../lib/errors";
 import { hashColor } from "../lib/hash";
 import type { PadAction } from "../lib/useGamepad";
 import { Glyph, type InputDevice } from "./Glyph";
 
 /*
- * Встроенный браузер игрового режима.
- *
- * Настоящая страница — нативный WebView, который бэкенд кладёт ПОВЕРХ окна ровно в прямоугольник
- * `.bp-view` (заглушка в DOM). Поэтому:
- *  - нативный вид показываем (browserOpen) только когда панель доехала до места, страница жива
- *    и поверх заглушки нет наших оверлеев (меню, экран запуска);
- *  - при любом из этих условий «нет» — browserHide (страница и звонок продолжают жить);
- *  - размеры/положение заглушки шлём через browserSetBounds (ResizeObserver + resize окна, через rAF).
+ * Боковая панель игрового режима. Источник панели (source):
+ *  - "web" — встроенный браузер: нативный WebView, который бэкенд кладёт ПОВЕРХ окна ровно в
+ *    прямоугольник `.bp-view` (заглушка в DOM);
+ *  - DockApp.id ("chrome", "discord", …) — настоящее окно приложения пользователя, которое бэкенд
+ *    «пристыковывает» (без рамки, не в Alt+Tab) в тот же прямоугольник.
+ * Правила одинаковые для обоих:
+ *  - нативный вид показываем (browserOpen / dockOpen) только когда панель доехала до места,
+ *    содержимое живо и поверх заглушки нет наших оверлеев (меню, экран запуска);
+ *  - при любом «нет» — browserHide / dockHide (страница, приложение и звонок продолжают жить);
+ *  - размеры заглушки шлём через browserSetBounds / dockSetBounds (ResizeObserver + resize окна, через rAF);
+ *  - одновременно показан только один нативный вид.
  */
 
 type Phase = "closed" | "opening" | "open" | "closing";
+export type DockStatus = "idle" | "loading" | "ready" | "error";
 
+export const WEB = "web";
 const SLIDE_MS = 420;
 
 /** В dev-моке (обычный браузер) настоящего WebView нет — рисуем полосатую заглушку. */
@@ -27,18 +33,34 @@ export interface BrowserCtl {
   phase: Phase;
   /** Панель на экране (в т.ч. въезжает/уезжает). */
   shown: boolean;
-  /** Страница открыта (возможно, идёт звонок), даже если панель спрятана. */
+  /** Что показывает панель: "web" или DockApp.id. */
+  source: string;
+  /** Страница встроенного браузера открыта (возможно, идёт звонок), даже если панель спрятана. */
   alive: boolean;
   url: string | null;
+  /** Приложение, пристыкованное в панель (или стыкуемое прямо сейчас). */
+  dockApp: string | null;
+  /** Последнее состояние пристыкованного окна от бэкенда. */
+  dock: DockState | null;
+  dockStatus: DockStatus;
+  dockError: string | null;
   expanded: boolean;
   viewRef: MutableRefObject<HTMLDivElement | null>;
-  /** Показать панель; url — сразу перейти на адрес; null — последняя страница или «домашняя» с закладками. */
+  /** Показать панель с текущим источником; url — сразу открыть адрес во встроенном браузере. */
   show: (url?: string | null) => void;
+  /** Показать панель с источником `source`; для приложений — пристыковать; url — открыть адрес (браузеры). */
+  openIn: (source: string, url?: string | null) => void;
   hide: () => void;
   toggle: () => void;
-  /** Закрыть страницу совсем (звонок завершится). */
+  /** Закрыть страницу встроенного браузера совсем (звонок завершится). */
   close: () => void;
   navigate: (url: string) => void;
+  /** Отстыковать приложение: окно вернётся на рабочий стол. */
+  release: () => void;
+  /** Повторить стыковку после ошибки. */
+  retry: () => void;
+  /** Окно игрового режима спрятано: бэкенд сам отстыковал окно, панель — закрыта. */
+  reset: () => void;
   setExpanded: (v: boolean) => void;
   onSlideEnd: () => void;
 }
@@ -51,54 +73,148 @@ function rectOf(el: HTMLElement): Rect {
 const sameRect = (a: Rect | null, b: Rect) =>
   !!a && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5 && Math.abs(a.height - b.height) < 0.5;
 
-const logErr = (what: string) => (e: unknown) => console.warn(`[browser] ${what}`, e);
+const logErr = (what: string) => (e: unknown) => console.warn(`[panel] ${what}`, e);
 
-/** Состояние панели и синхронизация с нативным WebView. `occluded` — поверх панели наш оверлей. */
-export function useBrowserPanel(occluded: boolean): BrowserCtl {
+const isDockKey = (k: string | null) => !!k && k.startsWith("dock:");
+
+/**
+ * Состояние панели и синхронизация с нативными видами.
+ * `occluded` — поверх панели наш оверлей; `defaultSource` — источник по умолчанию из настроек.
+ */
+export function useBrowserPanel(occluded: boolean, defaultSource: string): BrowserCtl {
   const [phase, setPhase] = useState<Phase>("closed");
+  const [source, setSource] = useState<string>(defaultSource);
   const [alive, setAlive] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
+  const [dockApp, setDockApp] = useState<string | null>(null);
+  const [dock, setDock] = useState<DockState | null>(null);
+  const [dockStatus, setDockStatus] = useState<DockStatus>("idle");
+  const [dockError, setDockError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const viewRef = useRef<HTMLDivElement | null>(null);
-  /** Адрес, на который перейти при следующем показе нативного вида. */
-  const pending = useRef<string | null>(null);
-  /** Нативный вид сейчас показан. */
-  const nativeShown = useRef(false);
+
+  /** Адрес для встроенного браузера при следующем показе. */
+  const pendingWeb = useRef<string | null>(null);
+  /** Адрес для пристыкованного браузера при следующем dockOpen. */
+  const pendingDock = useRef<string | null>(null);
+  /** Что сейчас показано нативно: "web" | "dock:<app>:<attempt>" | null. */
+  const shownKey = useRef<string | null>(null);
   const lastRect = useRef<Rect | null>(null);
+  const openSeq = useRef(0);
+  const inflight = useRef(0);
+  const dockRef = useRef<DockState | null>(null);
+  dockRef.current = dock;
+  const dockAppRef = useRef<string | null>(null);
+  dockAppRef.current = dockApp;
+  const statusRef = useRef<DockStatus>("idle");
+  statusRef.current = dockStatus;
 
-  const visible = phase === "open" && alive && !occluded;
-
-  // показать / спрятать нативный вид
+  // источник по умолчанию пришёл из настроек (или изменился), пока панель закрыта и ничего не пристыковано
   useEffect(() => {
-    const el = viewRef.current;
-    if (visible && el && !nativeShown.current) {
-      nativeShown.current = true;
-      const r = rectOf(el);
-      lastRect.current = r;
-      const u = pending.current;
-      pending.current = null;
-      void api.browserOpen(u, r).catch(logErr("open"));
-    } else if (!visible && nativeShown.current) {
-      nativeShown.current = false;
-      lastRect.current = null;
-      void api.browserHide().catch(logErr("hide"));
+    if (phase === "closed" && !dockAppRef.current) setSource(defaultSource);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultSource]);
+
+  const ready = phase === "open" && !occluded;
+  const wantKey: string | null = !ready
+    ? null
+    : source === WEB
+      ? alive
+        ? "web"
+        : null
+      : dockApp === source
+        ? `dock:${dockApp}:${attempt}`
+        : null;
+
+  /** dockOpen с учётом гонок: панель могли спрятать, пока приложение запускалось. */
+  const openDock = useCallback((app: string, u: string | null, r: Rect, key: string) => {
+    const seq = ++openSeq.current;
+    inflight.current++;
+    if (dockRef.current?.appId !== app || statusRef.current === "error") {
+      setDockStatus("loading");
+      setDockError(null);
     }
-  }, [visible]);
+    api
+      .dockOpen(app, u, r)
+      .then((s) => {
+        if (seq !== openSeq.current) return; // устарело — есть запрос новее
+        setDock(s);
+        setDockStatus("ready");
+        if (shownKey.current !== key) {
+          // пока запускалось, панель спрятали/переключили — окно не должно висеть поверх
+          if (!isDockKey(shownKey.current)) void api.dockHide().catch(logErr("dock hide"));
+          return;
+        }
+        const el = viewRef.current;
+        if (el) {
+          const nr = rectOf(el);
+          if (!sameRect(r, nr)) {
+            lastRect.current = nr;
+            void api.dockSetBounds(nr).catch(logErr("dock bounds"));
+          }
+        }
+        const p = pendingDock.current;
+        if (p) {
+          pendingDock.current = null;
+          void api
+            .dockOpen(app, p, lastRect.current ?? r)
+            .then((s2) => setDock(s2))
+            .catch(logErr("dock url"));
+        }
+      })
+      .catch((e) => {
+        if (seq !== openSeq.current) return;
+        setDockStatus("error");
+        setDockError(errorMessage(e));
+      })
+      .finally(() => {
+        inflight.current--;
+      });
+  }, []);
+
+  // показать / спрятать нативный вид (только один одновременно)
+  useEffect(() => {
+    const cur = shownKey.current;
+    if (cur === wantKey) return;
+    if (cur === "web") void api.browserHide().catch(logErr("web hide"));
+    else if (isDockKey(cur) && !isDockKey(wantKey)) void api.dockHide().catch(logErr("dock hide"));
+    shownKey.current = null;
+    lastRect.current = null;
+    const el = viewRef.current;
+    if (!wantKey || !el) return;
+    shownKey.current = wantKey;
+    const r = rectOf(el);
+    lastRect.current = r;
+    if (wantKey === "web") {
+      const u = pendingWeb.current;
+      pendingWeb.current = null;
+      void api.browserOpen(u, r).catch(logErr("web open"));
+    } else {
+      const app = wantKey.split(":")[1];
+      const u = pendingDock.current;
+      pendingDock.current = null;
+      openDock(app, u, r, wantKey);
+    }
+  }, [wantKey, openDock]);
 
   // следим за прямоугольником заглушки, пока нативный вид показан
   useEffect(() => {
-    if (!visible) return;
+    if (!wantKey) return;
     const el = viewRef.current;
     if (!el) return;
+    const isWeb = wantKey === "web";
     let raf = 0;
     const sync = () => {
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        if (!nativeShown.current) return;
+        if (shownKey.current !== wantKey) return;
         const r = rectOf(el);
         if (sameRect(lastRect.current, r)) return;
         lastRect.current = r;
-        void api.browserSetBounds(r).catch(logErr("bounds"));
+        if (isWeb) void api.browserSetBounds(r).catch(logErr("web bounds"));
+        // пока приложение запускается, прямоугольник досылается после dockOpen
+        else if (statusRef.current === "ready") void api.dockSetBounds(r).catch(logErr("dock bounds"));
       });
     };
     const ro = new ResizeObserver(sync);
@@ -109,13 +225,42 @@ export function useBrowserPanel(occluded: boolean): BrowserCtl {
       ro.disconnect();
       window.removeEventListener("resize", sync);
     };
-  }, [visible]);
+  }, [wantKey]);
 
-  // адрес страницы от бэкенда
+  // адрес страницы встроенного браузера от бэкенда
   useEffect(() => {
     let disposed = false;
     let un: (() => void) | undefined;
     onBrowserUrl((u) => !disposed && setUrl(u))
+      .then((f) => (disposed ? f() : (un = f)))
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
+
+  // пристыкованное окно изменилось: закрылось само / отстыковано / сменился заголовок
+  useEffect(() => {
+    let disposed = false;
+    let un: (() => void) | undefined;
+    onDockChanged((s) => {
+      if (disposed) return;
+      if (s) {
+        if (s.appId === dockAppRef.current) setDock(s);
+        return;
+      }
+      // во время dockOpen бэкенд может отстыковать прежнее окно — это не про нас
+      if (inflight.current > 0) return;
+      if (isDockKey(shownKey.current)) {
+        shownKey.current = null;
+        lastRect.current = null;
+      }
+      setDockApp(null);
+      setDock(null);
+      setDockStatus("idle");
+      setDockError(null);
+    })
       .then((f) => (disposed ? f() : (un = f)))
       .catch(() => {});
     return () => {
@@ -132,24 +277,53 @@ export function useBrowserPanel(occluded: boolean): BrowserCtl {
   }, [phase]);
 
   const onSlideEnd = useCallback(() => setPhase((p) => (p === "opening" ? "open" : p === "closing" ? "closed" : p)), []);
+  const reveal = useCallback(() => setPhase((p) => (p === "closed" || p === "closing" ? "opening" : p)), []);
 
-  const navigate = useCallback((u: string) => {
-    setUrl(u);
-    setAlive(true);
-    if (nativeShown.current && viewRef.current) {
-      void api.browserOpen(u, rectOf(viewRef.current)).catch(logErr("open"));
-    } else {
-      pending.current = u;
-      setPhase((p) => (p === "closed" || p === "closing" ? "opening" : p));
-    }
-  }, []);
+  const navigate = useCallback(
+    (u: string) => {
+      setSource(WEB);
+      setUrl(u);
+      setAlive(true);
+      if (shownKey.current === "web" && viewRef.current) {
+        void api.browserOpen(u, rectOf(viewRef.current)).catch(logErr("web open"));
+      } else {
+        pendingWeb.current = u;
+        reveal();
+      }
+    },
+    [reveal],
+  );
+
+  const openIn = useCallback(
+    (src: string, u?: string | null) => {
+      if (src === WEB) {
+        setSource(WEB);
+        if (u) navigate(u);
+        else reveal();
+        return;
+      }
+      setSource(src);
+      setDockApp(src);
+      const key = shownKey.current;
+      if (u && key && key.startsWith(`dock:${src}:`) && statusRef.current === "ready" && viewRef.current) {
+        // приложение уже в панели — просто открыть адрес в нём
+        const r = rectOf(viewRef.current);
+        void api
+          .dockOpen(src, u, r)
+          .then((s) => setDock(s))
+          .catch(logErr("dock url"));
+      } else if (u) pendingDock.current = u;
+      reveal();
+    },
+    [navigate, reveal],
+  );
 
   const show = useCallback(
     (u?: string | null) => {
       if (u) navigate(u);
-      else setPhase((p) => (p === "closed" || p === "closing" ? "opening" : p));
+      else reveal();
     },
-    [navigate],
+    [navigate, reveal],
   );
 
   const hide = useCallback(() => setPhase((p) => (p === "open" || p === "opening" ? "closing" : p)), []);
@@ -160,26 +334,72 @@ export function useBrowserPanel(occluded: boolean): BrowserCtl {
 
   const close = useCallback(() => {
     // browserClose убирает и вид, и страницу — browserHide после него не нужен
-    nativeShown.current = false;
-    lastRect.current = null;
-    pending.current = null;
+    if (shownKey.current === "web") {
+      shownKey.current = null;
+      lastRect.current = null;
+    }
+    pendingWeb.current = null;
     setAlive(false);
     setUrl(null);
-    void api.browserClose().catch(logErr("close"));
+    void api.browserClose().catch(logErr("web close"));
   }, []);
+
+  const release = useCallback(() => {
+    // dockRelease сам убирает окно из панели — dockHide после него не нужен
+    if (isDockKey(shownKey.current)) {
+      shownKey.current = null;
+      lastRect.current = null;
+    }
+    openSeq.current++;
+    pendingDock.current = null;
+    setDockApp(null);
+    setDock(null);
+    setDockStatus("idle");
+    setDockError(null);
+    void api.dockRelease().catch(logErr("dock release"));
+  }, []);
+
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+
+  const reset = useCallback(() => {
+    if (isDockKey(shownKey.current)) {
+      shownKey.current = null;
+      lastRect.current = null;
+    }
+    openSeq.current++;
+    pendingDock.current = null;
+    pendingWeb.current = null;
+    setPhase("closed");
+    setExpanded(false);
+    setDockApp(null);
+    setDock(null);
+    setDockStatus("idle");
+    setDockError(null);
+    setSource(defaultSource);
+  }, [defaultSource]);
 
   return {
     phase,
     shown: phase !== "closed",
+    source,
     alive,
     url,
+    dockApp,
+    dock,
+    // «готово» относится к прежнему приложению, пока новое не пристыковано
+    dockStatus: dockStatus === "ready" && dockApp && dock?.appId !== dockApp ? "loading" : dockStatus,
+    dockError,
     expanded,
     viewRef,
     show,
+    openIn,
     hide,
     toggle,
     close,
     navigate,
+    release,
+    retry,
+    reset,
     setExpanded,
     onSlideEnd,
   };
@@ -219,6 +439,43 @@ export function SiteIcon({ bm, className }: { bm: Bookmark; className?: string }
   );
 }
 
+// ---------- приложения ----------
+
+/** Фирменный цвет и буква для значка приложения (без логотипов). */
+const APP_SPEC: Record<string, { brand: string; letter: string }> = {
+  chrome: { brand: "#4285f4", letter: "C" },
+  edge: { brand: "#0c8ce9", letter: "E" },
+  firefox: { brand: "#ff7139", letter: "F" },
+  opera: { brand: "#ff1b2d", letter: "O" },
+  operaGx: { brand: "#fa1e4e", letter: "GX" },
+  brave: { brand: "#fb542b", letter: "B" },
+  yandex: { brand: "#fc3f1d", letter: "Я" },
+  discord: { brand: "#5865f2", letter: "D" },
+  telegram: { brand: "#2aabee", letter: "T" },
+  steamChat: { brand: "#1a9fff", letter: "S" },
+};
+
+export const appBrand = (id: string) => APP_SPEC[id]?.brand ?? hashColor(id);
+
+/** «Google Chrome» → «Chrome», «Microsoft Edge» → «Edge». */
+export const shortAppName = (name: string) => name.replace(/^(Google|Microsoft|Mozilla)\s+/i, "");
+
+export function AppIcon({ id, className }: { id: string; className?: string }) {
+  if (id === WEB)
+    return (
+      <span className={`app-icon app-icon--web ${className ?? ""}`}>
+        <span className="app-icon__glyph">{ICONS.globe}</span>
+      </span>
+    );
+  const s = APP_SPEC[id];
+  const letter = s?.letter ?? id.slice(0, 1).toUpperCase();
+  return (
+    <span className={`app-icon ${className ?? ""}`} style={{ "--app": appBrand(id) } as CSSProperties}>
+      <span className={`app-icon__letter${letter.length > 1 ? " is-small" : ""}`}>{letter}</span>
+    </span>
+  );
+}
+
 // ---------- иконки ----------
 
 const I = ({ d, fill }: { d: string; fill?: boolean }) => (
@@ -238,18 +495,25 @@ const ICONS = {
   hangup: (
     <I d="M2.9 11.6c4.1-3.6 10.1-3.6 14.2 0l-1.3 2.1a1 1 0 0 1-1.25.4l-2.1-.9a1 1 0 0 1-.6-.95v-1.4a7.7 7.7 0 0 0-3.7 0v1.4a1 1 0 0 1-.6.95l-2.1.9a1 1 0 0 1-1.25-.4z" />
   ),
+  detach: <I d="M8 4H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3M11 3.8h5.2V9M16 4l-7 7" />,
   search: <I d="M8.8 14.6a5.8 5.8 0 1 0 0-11.6 5.8 5.8 0 0 0 0 11.6zM13 13l4 4" />,
   globe: <I d="M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM3 10h14M10 3c2 2.2 2.8 4.6 2.8 7s-.8 4.8-2.8 7c-2-2.2-2.8-4.6-2.8-7S8 5.2 10 3z" />,
+  retry: <I d="M15.6 10a5.6 5.6 0 1 1-1.64-3.96M15.8 3.6v3.2h-3.2" />,
+  dock: <I d="M3.5 5.5a1.5 1.5 0 0 1 1.5-1.5h10a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5zM11.5 4v12" />,
 };
 
 // ---------- панель ----------
 
-type CtlId = "back" | "forward" | "reload" | "star" | "expand" | "hide" | "close";
+type CtlId = "back" | "forward" | "reload" | "star" | "expand" | "hide" | "close" | "release";
 
 interface PanelProps {
   ctl: BrowserCtl;
+  /** Установленные приложения, которые можно пристыковать. */
+  apps: DockApp[];
   bookmarks: Bookmark[];
   onSaveBookmarks: (b: Bookmark[]) => void;
+  /** Пользователь выбрал источник в переключателе (браузеры запоминаются по умолчанию). */
+  onPickSource: (id: string) => void;
   device: InputDevice;
   /** Подсветка фокуса (управление геймпадом/клавиатурой). */
   showFocus: boolean;
@@ -257,17 +521,26 @@ interface PanelProps {
   padRef: MutableRefObject<((a: PadAction) => void) | null>;
 }
 
-
 type Ctl = { id: CtlId; label: string; icon: ReactNode; text?: string; danger?: boolean };
-/** Строки фокуса геймпада: 0 — заголовок, 1 — навигация, 2 — закладки. */
+/** Элементы строки 2: кнопка «открыть приложение», «повторить» или закладка. */
+type Item = { key: string; kind: "cta" | "retry" | "bm"; bm?: Bookmark };
+/** Строки фокуса геймпада: 0 — заголовок (источники + кнопки), 1 — навигация, 2 — закладки/действия. */
 type Row = 0 | 1 | 2;
 
-export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocus, padRef }: PanelProps) {
+export function BrowserPanel({ ctl, apps, bookmarks, onSaveBookmarks, onPickSource, device, showFocus, padRef }: PanelProps) {
   const [draft, setDraft] = useState(ctl.url ?? "");
   const [editing, setEditing] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const [focus, setFocus] = useState<{ row: Row; idx: number }>({ row: 2, idx: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const isWeb = ctl.source === WEB;
+  const app = isWeb ? null : (apps.find((a) => a.id === ctl.source) ?? null);
+  const appName = app ? shortAppName(app.name) : ctl.source;
+  const isBrowserApp = !isWeb && (app?.kind ?? "browser") === "browser";
+  const docked = !isWeb && ctl.dockApp === ctl.source;
+  /** Содержимое живо (страница или пристыкованное окно). */
+  const live = isWeb ? ctl.alive : docked;
 
   useEffect(() => {
     if (!editing) setDraft(ctl.url ?? "");
@@ -279,12 +552,13 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
     return () => window.clearTimeout(t);
   }, [confirmClose]);
 
-  // при каждом открытии — фокус на закладки (домашняя) или на «Свернуть» (страница)
-  const opening = ctl.phase === "opening";
-  useEffect(() => {
-    if (opening) setFocus(ctl.alive ? { row: 0, idx: 1 } : { row: 2, idx: 0 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opening]);
+  const sources: Array<{ id: string; name: string; kind: "web" | "browser" | "voice" }> = [
+    { id: WEB, name: "Встроенный", kind: "web" },
+    ...apps.filter((a) => a.installed && a.kind === "browser").map((a) => ({ id: a.id, name: shortAppName(a.name), kind: "browser" as const })),
+    ...apps.filter((a) => a.installed && a.kind === "voice").map((a) => ({ id: a.id, name: a.name, kind: "voice" as const })),
+  ];
+  // источник, которого нет в списке (список ещё грузится) — всё равно показываем
+  if (!sources.some((s) => s.id === ctl.source)) sources.push({ id: ctl.source, name: appName, kind: "browser" });
 
   const current = ctl.url;
   const starred = !!current && bookmarks.some((b) => normUrl(b.url) === normUrl(current));
@@ -302,21 +576,48 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
   const titleCtls: Ctl[] = [
     { id: "expand", label: ctl.expanded ? "Сузить панель" : "Развернуть панель", icon: ctl.expanded ? ICONS.shrink : ICONS.expand },
     { id: "hide", label: "Свернуть (звонок продолжится)", icon: ICONS.hide, text: "Свернуть" },
-    ...(ctl.alive
+    ...(isWeb && ctl.alive
       ? [{ id: "close" as const, label: "Закрыть страницу", icon: ICONS.hangup, text: confirmClose ? "Точно завершить?" : "Завершить", danger: true }]
       : []),
+    ...(docked ? [{ id: "release" as const, label: `Вернуть окно ${appName} на рабочий стол`, icon: ICONS.detach, text: "Отсоединить" }] : []),
   ];
-  const navCtls: Ctl[] = ctl.alive
-    ? [
-        { id: "back", label: "Назад", icon: ICONS.back },
-        { id: "forward", label: "Вперёд", icon: ICONS.forward },
-        { id: "reload", label: "Обновить", icon: ICONS.reload },
-      ]
-    : [];
-  const starCtl: Ctl[] = ctl.alive
-    ? [{ id: "star", label: starred ? "Убрать из закладок" : "Добавить в закладки", icon: starred ? ICONS.starOn : ICONS.starOff }]
-    : [];
-  const rows: Record<Row, number> = { 0: titleCtls.length, 1: navCtls.length + starCtl.length, 2: bookmarks.length };
+  const navCtls: Ctl[] =
+    isWeb && ctl.alive
+      ? [
+          { id: "back", label: "Назад", icon: ICONS.back },
+          { id: "forward", label: "Вперёд", icon: ICONS.forward },
+          { id: "reload", label: "Обновить", icon: ICONS.reload },
+        ]
+      : [];
+  const starCtl: Ctl[] =
+    isWeb && ctl.alive ? [{ id: "star", label: starred ? "Убрать из закладок" : "Добавить в закладки", icon: starred ? ICONS.starOn : ICONS.starOff }] : [];
+  const bmItems: Item[] = bookmarks.map((b) => ({ key: `bm:${b.url}`, kind: "bm", bm: b }));
+  const items: Item[] = isWeb
+    ? bmItems
+    : [
+        ...(docked && ctl.dockStatus === "error" ? [{ key: "retry", kind: "retry" as const }] : []),
+        ...(!docked ? [{ key: "cta", kind: "cta" as const }] : []),
+        ...(isBrowserApp ? bmItems : []),
+      ];
+  const row0 = sources.length + titleCtls.length;
+  const rows: Record<Row, number> = { 0: row0, 1: isWeb ? navCtls.length + starCtl.length : 0, 2: items.length };
+
+  // при каждом открытии — фокус на закладки (домашняя) или на «Свернуть» (страница/окно)
+  const opening = ctl.phase === "opening";
+  useEffect(() => {
+    if (opening) setFocus(live ? { row: 0, idx: sources.length + 1 } : { row: 2, idx: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opening]);
+
+  const openBookmark = (u: string) => {
+    if (isWeb) ctl.navigate(u);
+    else ctl.openIn(ctl.source, u);
+  };
+
+  const pickSource = (id: string) => {
+    if (id === ctl.source && (id === WEB || docked)) return;
+    onPickSource(id);
+  };
 
   const run = (id: CtlId) => {
     switch (id) {
@@ -340,7 +641,17 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
           ctl.close();
         } else setConfirmClose(true);
         break;
+      case "release":
+        ctl.release();
+        setFocus({ row: 2, idx: 0 });
+        break;
     }
+  };
+
+  const runItem = (it: Item) => {
+    if (it.kind === "bm" && it.bm) openBookmark(it.bm.url);
+    else if (it.kind === "retry") ctl.retry();
+    else if (it.kind === "cta") ctl.openIn(ctl.source, null);
   };
 
   const submit = () => {
@@ -379,21 +690,23 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
         break;
       }
       case "confirm":
-        if (cur.row === 0) run(titleCtls[cur.idx].id);
-        else if (cur.row === 1) run([...navCtls, ...starCtl][cur.idx].id);
-        else if (bookmarks[cur.idx]) ctl.navigate(bookmarks[cur.idx].url);
+        if (cur.row === 0) {
+          if (cur.idx < sources.length) pickSource(sources[cur.idx].id);
+          else run(titleCtls[cur.idx - sources.length].id);
+        } else if (cur.row === 1) run([...navCtls, ...starCtl][cur.idx].id);
+        else if (items[cur.idx]) runItem(items[cur.idx]);
         break;
       case "back":
         ctl.hide();
         break;
       case "tabPrev":
-        if (ctl.alive) void api.browserNav("back").catch(() => {});
+        if (isWeb && ctl.alive) void api.browserNav("back").catch(() => {});
         break;
       case "tabNext":
-        if (ctl.alive) void api.browserNav("forward").catch(() => {});
+        if (isWeb && ctl.alive) void api.browserNav("forward").catch(() => {});
         break;
       case "folder":
-        inputRef.current?.focus();
+        if (isWeb) inputRef.current?.focus();
         break;
     }
   };
@@ -406,6 +719,7 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
   );
 
   const isF = (row: Row, idx: number) => showFocus && cur.row === row && cur.idx === idx;
+  const itemIdx = (key: string) => items.findIndex((it) => it.key === key);
 
   const renderCtl = (c: Ctl, row: Row, idx: number) => (
     <button
@@ -420,118 +734,227 @@ export function BrowserPanel({ ctl, bookmarks, onSaveBookmarks, device, showFocu
     </button>
   );
 
-  const cls = `bp bp--${ctl.phase}${ctl.expanded ? " bp--wide" : ""}`;
-  return (
-    <aside className={cls} onAnimationEnd={(e) => e.target === e.currentTarget && ctl.onSlideEnd()}>
-      <div className="bp-titlebar">
-        <div className="bp-title">
-          {ctl.alive && current ? (
-            <SiteIcon bm={{ name: hostOf(current), url: current }} className="site-icon--title" />
-          ) : (
-            <span className="bp-title__globe">{ICONS.globe}</span>
-          )}
-          <span className="bp-title__text">
-            <span className="bp-title__name">{ctl.alive && current ? hostOf(current) : "Браузер"}</span>
-            {ctl.alive && (
-              <span className="bp-title__live">
-                <span className="live-dot" />
-                Свернёте панель — звонок продолжится
-              </span>
-            )}
-          </span>
-        </div>
-        <div className="bp-group">{titleCtls.map((c, i) => renderCtl(c, 0, i))}</div>
-      </div>
-
-      <header className="bp-head">
-        {navCtls.length > 0 && <div className="bp-group">{navCtls.map((c, i) => renderCtl(c, 1, i))}</div>}
-        <label className={`bp-url${editing ? " is-editing" : ""}`}>
-          <span className="bp-url__icon">{ICONS.search}</span>
-          <input
-            ref={inputRef}
-            value={draft}
-            spellCheck={false}
-            placeholder="Адрес сайта или поиск в Google"
-            onFocus={(e) => {
-              setEditing(true);
-              e.currentTarget.select();
-            }}
-            onBlur={() => setEditing(false)}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                submit();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setDraft(ctl.url ?? "");
-                e.currentTarget.blur();
-              }
-            }}
-          />
-          {!editing && <Glyph action="folder" device={device} />}
-        </label>
-        {starCtl.map((c) => renderCtl(c, 1, navCtls.length))}
-      </header>
-
-      {ctl.alive && bookmarks.length > 0 && (
-        <nav className="bp-marks">
-          {bookmarks.map((b, i) => (
+  const renderMarks = () =>
+    bookmarks.length > 0 && (
+      <nav className="bp-marks">
+        {bookmarks.map((b) => {
+          const i = itemIdx(`bm:${b.url}`);
+          return (
             <button
               key={b.url}
-              className={`bp-mark${current && normUrl(current) === normUrl(b.url) ? " is-current" : ""}${isF(2, i) ? " is-focused" : ""}`}
-              onClick={() => ctl.navigate(b.url)}
-              title={b.url}
+              className={`bp-mark${isWeb && current && normUrl(current) === normUrl(b.url) ? " is-current" : ""}${isF(2, i) ? " is-focused" : ""}`}
+              onClick={() => openBookmark(b.url)}
+              title={isWeb ? b.url : `Открыть в ${appName}: ${b.url}`}
             >
               <SiteIcon bm={b} />
               <span>{b.name}</span>
             </button>
-          ))}
-        </nav>
+          );
+        })}
+      </nav>
+    );
+
+  const renderGrid = () => (
+    <div className="bp-home__grid">
+      {bookmarks.map((b) => {
+        const i = itemIdx(`bm:${b.url}`);
+        return (
+          <button key={b.url} className={`bp-site${isF(2, i) ? " is-focused" : ""}`} onClick={() => openBookmark(b.url)}>
+            <SiteIcon bm={b} className="site-icon--lg" />
+            <span className="bp-site__name">{b.name}</span>
+            <span className="bp-site__host">{hostOf(b.url)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  // ---------- содержимое области вида ----------
+  let view: ReactNode;
+  if (isWeb) {
+    view = ctl.alive ? (
+      IS_MOCK ? (
+        <div className="bp-mock">
+          <div className="bp-mock__badge">WebView</div>
+          <div className="bp-mock__url">{current}</div>
+          <div className="bp-mock__note">Здесь бэкенд разместит настоящую страницу</div>
+        </div>
+      ) : (
+        <div className="bp-loading">
+          <span className="bp-spinner" />
+        </div>
+      )
+    ) : (
+      <div className="bp-home">
+        <div className="bp-home__hero">
+          <span className="bp-home__globe">{ICONS.globe}</span>
+          <div>
+            <div className="bp-home__title">Голос в браузере</div>
+            <div className="bp-home__text">Созвон в Meet, Telegram или Discord прямо в игровом режиме. Сверните панель — звонок продолжится.</div>
+          </div>
+        </div>
+        {bookmarks.length > 0 ? (
+          <>
+            <div className="bp-home__label">Закладки</div>
+            {renderGrid()}
+          </>
+        ) : (
+          <div className="bp-home__empty">Откройте сайт и нажмите ★, чтобы он появился здесь.</div>
+        )}
+      </div>
+    );
+  } else if (!docked) {
+    const ctaI = itemIdx("cta");
+    view = (
+      <div className="bp-home">
+        <div className="bp-home__hero">
+          <AppIcon id={ctl.source} className="app-icon--hero" />
+          <div>
+            <div className="bp-home__title">{appName} в панели</div>
+            <div className="bp-home__text">
+              {isBrowserApp
+                ? `Ваш ${appName} со всеми входами и вкладками — прямо в игровом режиме, без Alt+Tab.`
+                : `Окно ${appName} откроется здесь, без Alt+Tab. Сверните панель — звонок продолжится.`}
+            </div>
+          </div>
+        </div>
+        <button className={`bp-cta${isF(2, ctaI) ? " is-focused" : ""}`} style={{ "--app": appBrand(ctl.source) } as CSSProperties} onClick={() => ctl.openIn(ctl.source, null)}>
+          {ICONS.dock}
+          <span>Открыть {appName} здесь</span>
+        </button>
+        {isBrowserApp && bookmarks.length > 0 && (
+          <>
+            <div className="bp-home__label bp-home__label--gap">Закладки — откроются в {appName}</div>
+            {renderGrid()}
+          </>
+        )}
+      </div>
+    );
+  } else if (ctl.dockStatus === "error") {
+    const ri = itemIdx("retry");
+    view = (
+      <div className="bp-dockstate bp-dockstate--error">
+        <AppIcon id={ctl.source} className="app-icon--hero" />
+        <div className="bp-dockstate__title">Не удалось открыть {appName}</div>
+        <div className="bp-dockstate__text">{ctl.dockError}</div>
+        <button className={`bp-cta${isF(2, ri) ? " is-focused" : ""}`} style={{ "--app": appBrand(ctl.source) } as CSSProperties} onClick={() => ctl.retry()}>
+          {ICONS.retry}
+          <span>Повторить</span>
+        </button>
+      </div>
+    );
+  } else if (ctl.dockStatus === "ready" && IS_MOCK) {
+    view = (
+      <div className="bp-mock" style={{ "--app": appBrand(ctl.source) } as CSSProperties}>
+        <div className="bp-mock__badge">Окно {appName}</div>
+        <div className="bp-mock__url">{ctl.dock?.title}</div>
+        <div className="bp-mock__note">Здесь бэкенд разместит настоящее окно приложения</div>
+      </div>
+    );
+  } else if (ctl.dockStatus === "ready") {
+    view = <div className="bp-loading" />;
+  } else {
+    view = (
+      <div className="bp-dockstate">
+        <span className="bp-dockstate__ring" style={{ "--app": appBrand(ctl.source) } as CSSProperties}>
+          <AppIcon id={ctl.source} className="app-icon--hero" />
+        </span>
+        <div className="bp-dockstate__title">Запускаем {appName}…</div>
+        <div className="bp-dockstate__text">Окно появится прямо здесь — без Alt+Tab</div>
+      </div>
+    );
+  }
+
+  const cls = `bp bp--${ctl.phase}${ctl.expanded ? " bp--wide" : ""}`;
+  return (
+    <aside className={cls} onAnimationEnd={(e) => e.target === e.currentTarget && ctl.onSlideEnd()}>
+      <div className="bp-titlebar">
+        <div className="bp-sources" role="tablist" aria-label="Что показать в панели">
+          {sources.map((s, i) => {
+            const on = s.id === ctl.source;
+            const isLive = s.id === WEB ? ctl.alive : ctl.dockApp === s.id;
+            const prevKind = i > 0 ? sources[i - 1].kind : s.kind;
+            return (
+              <button
+                key={s.id}
+                role="tab"
+                aria-selected={on}
+                className={`bp-src${on ? " is-on" : ""}${isF(0, i) ? " is-focused" : ""}${prevKind !== s.kind && s.kind === "voice" ? " bp-src--sep" : ""}`}
+                style={{ "--app": s.id === WEB ? "var(--glow)" : appBrand(s.id) } as CSSProperties}
+                title={s.id === WEB ? "Встроенный браузер" : s.name}
+                onClick={() => pickSource(s.id)}
+              >
+                <AppIcon id={s.id} />
+                {on && <span className="bp-src__name">{s.name}</span>}
+                {isLive && <span className="live-dot bp-src__live" />}
+              </button>
+            );
+          })}
+        </div>
+        <div className="bp-group">{titleCtls.map((c, i) => renderCtl(c, 0, sources.length + i))}</div>
+      </div>
+
+      {isWeb ? (
+        <header className="bp-head">
+          {navCtls.length > 0 && <div className="bp-group">{navCtls.map((c, i) => renderCtl(c, 1, i))}</div>}
+          <label className={`bp-url${editing ? " is-editing" : ""}`}>
+            <span className="bp-url__icon">{ICONS.search}</span>
+            <input
+              ref={inputRef}
+              value={draft}
+              spellCheck={false}
+              placeholder="Адрес сайта или поиск в Google"
+              onFocus={(e) => {
+                setEditing(true);
+                e.currentTarget.select();
+              }}
+              onBlur={() => setEditing(false)}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setDraft(ctl.url ?? "");
+                  e.currentTarget.blur();
+                }
+              }}
+            />
+            {!editing && <Glyph action="folder" device={device} />}
+          </label>
+          {starCtl.map((c) => renderCtl(c, 1, navCtls.length))}
+        </header>
+      ) : (
+        docked && (
+          <header className="bp-head bp-dockinfo">
+            <AppIcon id={ctl.source} className="app-icon--title" />
+            <span className="bp-title__text">
+              <span className="bp-title__name">
+                {appName}
+                {ctl.dock?.title && ctl.dock.title !== appName && ctl.dockStatus === "ready" && <span className="bp-dockinfo__win"> · {ctl.dock.title}</span>}
+              </span>
+              <span className="bp-title__live">
+                {ctl.dockStatus === "ready" ? (
+                  <>
+                    <span className="live-dot" />
+                    Свернёте панель — {isBrowserApp ? "вкладки и звонки продолжатся" : "звонок продолжится"}
+                  </>
+                ) : ctl.dockStatus === "error" ? (
+                  "Окно не пристыковано"
+                ) : (
+                  "Ищем окно приложения…"
+                )}
+              </span>
+            </span>
+          </header>
+        )
       )}
 
+      {((isWeb && ctl.alive) || (docked && isBrowserApp)) && renderMarks()}
+
       <div className="bp-view" ref={ctl.viewRef}>
-        {ctl.alive ? (
-          IS_MOCK ? (
-            <div className="bp-mock">
-              <div className="bp-mock__badge">WebView</div>
-              <div className="bp-mock__url">{current}</div>
-              <div className="bp-mock__note">Здесь бэкенд разместит настоящую страницу</div>
-            </div>
-          ) : (
-            <div className="bp-loading">
-              <span className="bp-spinner" />
-            </div>
-          )
-        ) : (
-          <div className="bp-home">
-            <div className="bp-home__hero">
-              <span className="bp-home__globe">{ICONS.globe}</span>
-              <div>
-                <div className="bp-home__title">Голос в браузере</div>
-                <div className="bp-home__text">
-                  Созвон в Meet, Telegram или Discord прямо в игровом режиме. Сверните панель — звонок продолжится.
-                </div>
-              </div>
-            </div>
-            {bookmarks.length > 0 ? (
-              <>
-                <div className="bp-home__label">Закладки</div>
-                <div className="bp-home__grid">
-                  {bookmarks.map((b, i) => (
-                    <button key={b.url} className={`bp-site${isF(2, i) ? " is-focused" : ""}`} onClick={() => ctl.navigate(b.url)}>
-                      <SiteIcon bm={b} className="site-icon--lg" />
-                      <span className="bp-site__name">{b.name}</span>
-                      <span className="bp-site__host">{hostOf(b.url)}</span>
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="bp-home__empty">Откройте сайт и нажмите ★, чтобы он появился здесь.</div>
-            )}
-          </div>
-        )}
+        {view}
       </div>
     </aside>
   );

@@ -84,6 +84,8 @@ fn default_config() -> AppConfig {
         launch_on_startup: true,
         apply_windows_theme: true,
         game_monitor: None,
+        panel_source: None,
+        auto_game_mode_on_pad: true,
     };
     let mut work = new_profile(ProfileKind::Work, "Работа");
     work.hotkey = Some("Ctrl+Alt+1".into());

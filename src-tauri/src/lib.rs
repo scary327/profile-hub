@@ -1,14 +1,17 @@
+mod batteries;
 mod browsers;
 mod commands;
 mod config;
 mod core;
 mod desktop;
+mod dock;
 mod gamemode;
 mod gamepad;
 mod games;
 mod models;
 mod processes;
 mod util;
+mod winfocus;
 mod winusers;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -43,7 +46,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                     commands::refresh_browsers(&app);
                     core::emit_state(&app);
                 }
-                "quit" => app.exit(0),
+                "quit" => {
+                    dock::release(&app);
+                    app.exit(0)
+                }
                 _ => {}
             }
         })
@@ -92,6 +98,8 @@ pub fn run() {
             }
             gamepad::spawn(handle.clone());
             core::spawn_session_watcher(handle.clone());
+            dock::spawn_watcher(handle.clone());
+            batteries::spawn_watcher();
             // прогреть кэш игр в фоне
             std::thread::spawn(move || {
                 core::games(&handle, false);
@@ -149,6 +157,14 @@ pub fn run() {
             commands::browser_close,
             commands::browser_nav,
             commands::save_voice_bookmarks,
+            commands::list_dock_apps,
+            commands::dock_open,
+            commands::dock_set_bounds,
+            commands::dock_hide,
+            commands::dock_release,
+            commands::dock_state,
+            commands::set_panel_source,
+            commands::device_batteries,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

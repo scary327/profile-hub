@@ -139,6 +139,49 @@ pub struct Settings {
     /// Монитор для игрового режима (имя из MonitorInfo.name); None — основной.
     #[serde(default)]
     pub game_monitor: Option<String>,
+    /// Что показывать в панели игрового режима по умолчанию:
+    /// "web" (встроенный браузер) или id приложения из DockApp (например "chrome").
+    #[serde(default)]
+    pub panel_source: Option<String>,
+    /// Открывать игровой режим, когда включается геймпад (если игра сейчас не запущена).
+    #[serde(default = "yes")]
+    pub auto_game_mode_on_pad: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Беспроводное устройство с батареей (Bluetooth-наушники, мышь и т.п.).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceBattery {
+    pub name: String,
+    pub percent: u8,
+    /// "gamepad" | "headset" | "mouse" | "keyboard" | "other"
+    pub kind: String,
+}
+
+/// Приложение, окно которого можно пристыковать в панель игрового режима.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockApp {
+    /// "chrome" | "edge" | "firefox" | "opera" | "operaGx" | "brave" | "yandex" | "discord" | "telegram" | "steamChat"
+    pub id: String,
+    pub name: String,
+    /// "browser" | "voice"
+    pub kind: String,
+    pub installed: bool,
+}
+
+/// Пристыкованное сейчас окно.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DockState {
+    pub app_id: String,
+    /// Заголовок окна (для шапки панели).
+    pub title: String,
+    pub visible: bool,
 }
 
 /// Закладка встроенного браузера игрового режима (звонилки и т.п.).

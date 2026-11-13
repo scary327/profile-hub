@@ -15,7 +15,9 @@ export type PadAction =
   | "menu"
   | "folder"
   /** Create/Share (DualSense, DS4) или View/Back (Xbox): голос и встроенный браузер. */
-  | "voice";
+  | "voice"
+  /** PS / Xbox Guide (приходит только от Rust): фокус переключает бэкенд, UI закрывает временные оверлеи. */
+  | "home";
 
 export type PadType = "playstation" | "xbox";
 
@@ -23,6 +25,9 @@ export interface GamepadInfo {
   connected: boolean;
   type: PadType;
   id: string;
+  /** Заряд 0..100; null — неизвестно (проводной или нет данных). */
+  battery?: number | null;
+  charging?: boolean;
 }
 
 const INITIAL_DELAY = 350;

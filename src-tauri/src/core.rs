@@ -6,7 +6,7 @@
 //! или выход из учётки — по настройке профиля.
 
 use crate::models::*;
-use crate::{browsers, config, desktop, games, processes, util, winusers};
+use crate::{browsers, config, desktop, games, processes, util, winfocus, winusers};
 use anyhow::{anyhow, bail, Result};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -222,20 +222,68 @@ pub fn show_game_window(app: &AppHandle) -> Result<()> {
     crate::gamemode::place_on_saved_monitor(app, &w);
     let _ = w.set_fullscreen(true);
     let _ = w.set_focus();
+    // set_focus не забирает фокус у игры, если последний ввод был с геймпада
+    if let Ok(h) = w.hwnd() {
+        winfocus::force_foreground(h.0 as _);
+    }
     hide_hub(app);
     Ok(())
 }
 
 fn hide_game_window(app: &AppHandle) {
+    crate::dock::release(app);
     if let Some(w) = app.get_webview_window("game") {
         let _ = w.hide();
     }
 }
 
-fn game_window_visible(app: &AppHandle) -> bool {
+pub fn game_window_visible(app: &AppHandle) -> bool {
     app.get_webview_window("game")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false)
+}
+
+/// HWND окна игр, если оно открыто.
+pub fn game_hwnd(app: &AppHandle) -> Option<isize> {
+    let w = app.get_webview_window("game")?;
+    if !w.is_visible().unwrap_or(false) {
+        return None;
+    }
+    w.hwnd().ok().map(|h| h.0 as isize)
+}
+
+/// Игровой профиль живёт в этой учётке (игры — побочный режим текущей учётки).
+pub fn gaming_here(app: &AppHandle) -> bool {
+    let st = state(app);
+    st.refresh_config();
+    gaming_profile(app).is_some_and(|g| g.windows_user.as_ref().is_none_or(|u| u.sid == st.sid))
+}
+
+/// Кнопка PS / Guide: меню ↔ игра.
+/// * меню на переднем плане → вернуть игру (последнюю запущенную);
+/// * меню открыто, но активна игра → забрать фокус в меню;
+/// * меню закрыто → открыть игровой режим (если он живёт в этой учётке).
+pub fn on_home_button(app: &AppHandle) {
+    match game_hwnd(app) {
+        Some(h) if winfocus::is_foreground_tree(winfocus::hwnd_from(h)) => {
+            match crate::gamemode::running_games(app).first() {
+                Some(g) => {
+                    if let Err(e) = crate::gamemode::focus_game(app, &g.game_id) {
+                        log::warn!("PS: не удалось вернуть игру: {e:#}");
+                    }
+                }
+                None => log::info!("PS: запущенных игр нет, остаёмся в меню"),
+            }
+        }
+        Some(h) => winfocus::force_foreground(winfocus::hwnd_from(h)),
+        None => {
+            if gaming_here(app) {
+                if let Err(e) = show_game_window(app) {
+                    log::error!("PS: не удалось открыть игровой режим: {e:#}");
+                }
+            }
+        }
+    }
 }
 
 // ---------- программы профиля (только в его учётке) ----------

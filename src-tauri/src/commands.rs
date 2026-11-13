@@ -311,6 +311,7 @@ pub async fn debug_log(msg: String) {
 
 #[tauri::command]
 pub async fn quit_app(app: AppHandle) {
+    crate::dock::release(&app);
     app.exit(0);
 }
 
@@ -394,4 +395,54 @@ pub async fn save_voice_bookmarks(app: AppHandle, bookmarks: Vec<Bookmark>) -> C
 /// Пересканировать браузеры (например, после установки нового).
 pub fn refresh_browsers(app: &AppHandle) {
     *state(app).browsers.lock() = browsers::detect();
+}
+
+// ---------- окна приложений в панели игрового режима ----------
+
+#[tauri::command]
+pub async fn list_dock_apps(app: AppHandle) -> Vec<DockApp> {
+    crate::dock::list_apps(&app)
+}
+
+#[tauri::command]
+pub async fn dock_open(app: AppHandle, app_id: String, url: Option<String>, rect: Rect) -> CmdResult<DockState> {
+    crate::dock::open(&app, &app_id, url.as_deref(), rect).map_err(ea)
+}
+
+#[tauri::command]
+pub async fn dock_set_bounds(app: AppHandle, rect: Rect) -> CmdResult<()> {
+    crate::dock::set_bounds(&app, rect).map_err(ea)
+}
+
+/// Спрятать окно панели. Если ничего не пристыковано — ничего не делает.
+#[tauri::command]
+pub async fn dock_hide(app: AppHandle) {
+    crate::dock::hide(&app)
+}
+
+#[tauri::command]
+pub async fn dock_release(app: AppHandle) {
+    crate::dock::release(&app)
+}
+
+#[tauri::command]
+pub async fn dock_state(app: AppHandle) -> Option<DockState> {
+    crate::dock::current(&app)
+}
+
+#[tauri::command]
+pub async fn set_panel_source(app: AppHandle, source: String) -> CmdResult<HubState> {
+    let source = source.trim().to_string();
+    state(&app)
+        .update_config(|cfg| {
+            cfg.settings.panel_source = (!source.is_empty()).then_some(source);
+            Ok(())
+        })
+        .map_err(ea)?;
+    Ok(core::hub_state(&app))
+}
+
+#[tauri::command]
+pub async fn device_batteries() -> Vec<DeviceBattery> {
+    crate::batteries::cached()
 }

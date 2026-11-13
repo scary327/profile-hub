@@ -12,8 +12,7 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, WebviewBuilder, WebviewUrl, WebviewWindow};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SetForegroundWindow, ShowWindow, GW_OWNER, SW_RESTORE,
+    EnumWindows, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER,
 };
 
 const BROWSER: &str = "voice-browser";
@@ -193,12 +192,8 @@ pub fn focus_game(app: &AppHandle, game_id: &str) -> Result<()> {
     let mut ctx = FindCtx { pids: &pids, best: None };
     unsafe { EnumWindows(Some(find_proc), &mut ctx as *mut FindCtx as LPARAM) };
     let (hwnd, _) = ctx.best.ok_or_else(|| anyhow!("окно игры не найдено"))?;
-    unsafe {
-        if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
-        }
-        SetForegroundWindow(hwnd);
-    }
+    // обычный SetForegroundWindow отказывает, если последний ввод был с геймпада
+    crate::winfocus::force_foreground(hwnd);
     Ok(())
 }
 

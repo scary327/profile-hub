@@ -95,6 +95,17 @@ export function SettingsPage({ state, onState }: { state: HubState; onState: (s:
             </div>
             <Toggle checked={draft.applyWindowsTheme} onChange={(v) => set("applyWindowsTheme", v)} label="Тема Windows" />
           </div>
+          <div className="setting">
+            <div className="setting__text">
+              <div className="setting__title">Открывать игровой режим при включении геймпада</div>
+              <div className="setting__sub">Только если игровой профиль живёт в этой учётке и сейчас не запущена игра</div>
+            </div>
+            <Toggle
+              checked={!!draft.autoGameModeOnPad}
+              onChange={(v) => set("autoGameModeOnPad", v)}
+              label="Игровой режим при включении геймпада"
+            />
+          </div>
         </div>
 
         <div className="card card--row">
